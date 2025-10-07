@@ -1,0 +1,175 @@
+{
+  "scan_id": "nikto-scan-1759490218",
+  "target": "http://testphp.vulnweb.com",
+  "started_at": 1759490218.582544,
+  "status": "completed",
+  "findings": [
+    {
+      "id": "N-001",
+      "title": "Apache/2.4.58 Server detected",
+      "severity": "Low",
+      "description": "Server version disclosure",
+      "url": "http://testphp.vulnweb.com/",
+      "evidence": "Server: Apache/2.4.58",
+      "recommendation": "Hide server version information",
+      "cve": "N/A",
+      "category": "Information Disclosure",
+      "request": {
+        "method": "GET",
+        "url": "http://testphp.vulnweb.com/",
+        "headers": {
+          "User-Agent": "Nikto/2.1.6"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Server": "Apache/2.4.58 (Ubuntu)",
+          "Content-Type": "text/html; charset=UTF-8",
+          "Content-Length": "1234"
+        },
+        "body": "<html><head><title>Welcome</title></head><body>Welcome to the application</body></html>"
+      }
+    },
+    {
+      "id": "N-002",
+      "title": "Directory indexing enabled",
+      "severity": "Medium",
+      "description": "Directory listing is enabled",
+      "url": "http://testphp.vulnweb.com/admin/",
+      "evidence": "Directory listing found",
+      "recommendation": "Disable directory indexing",
+      "cve": "N/A",
+      "category": "Information Disclosure",
+      "request": {
+        "method": "GET",
+        "url": "http://testphp.vulnweb.com/admin/",
+        "headers": {
+          "User-Agent": "Nikto/2.1.6"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Server": "Apache/2.4.58 (Ubuntu)",
+          "Content-Type": "text/html; charset=UTF-8"
+        },
+        "body": "<html><head><title>Index of /admin</title></head><body><h1>Index of /admin</h1><ul><li><a href=\"config.php\">config.php</a></li><li><a href=\"users.txt\">users.txt</a></li></ul></body></html>"
+      }
+    },
+    {
+      "id": "N-003",
+      "title": "PHP version disclosure",
+      "severity": "Low",
+      "description": "PHP version information exposed",
+      "url": "http://testphp.vulnweb.com/info.php",
+      "evidence": "X-Powered-By: PHP/8.1.0",
+      "recommendation": "Hide PHP version information",
+      "cve": "N/A",
+      "category": "Information Disclosure",
+      "request": {
+        "method": "GET",
+        "url": "http://testphp.vulnweb.com/info.php",
+        "headers": {
+          "User-Agent": "Nikto/2.1.6"
+        },
+        "body": ""
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Server": "Apache/2.4.58 (Ubuntu)",
+          "X-Powered-By": "PHP/8.1.0",
+          "Content-Type": "text/html; charset=UTF-8"
+        },
+        "body": "<html><head><title>PHP Info</title></head><body><h1>PHP Version 8.1.0</h1><p>System information...</p></body></html>"
+      }
+    },
+    {
+      "id": "N-004",
+      "title": "Missing security headers",
+      "severity": "Medium",
+      "description": "Important security headers are missing",
+      "url": "http://testphp.vulnweb.com/",
+      "evidence": "Missing X-Frame-Options, X-Content-Type-Options",
+      "recommendation": "Add security headers",
+      "cve": "N/A",
+      "category": "Security Misconfiguration"
+    },
+    {
+      "id": "N-005",
+      "title": "Sensitive file accessible",
+      "severity": "High",
+      "description": "Configuration file accessible",
+      "url": "http://testphp.vulnweb.com/config.php",
+      "evidence": "File accessible without authentication",
+      "recommendation": "Restrict access to configuration files",
+      "cve": "N/A",
+      "category": "Information Disclosure"
+    },
+    {
+      "id": "N-006",
+      "title": "Backup file found",
+      "severity": "Medium",
+      "description": "Backup file accessible",
+      "url": "http://testphp.vulnweb.com/backup.sql",
+      "evidence": "Backup file accessible",
+      "recommendation": "Remove backup files from web root",
+      "cve": "N/A",
+      "category": "Information Disclosure"
+    },
+    {
+      "id": "N-007",
+      "title": "Default credentials detected",
+      "severity": "Critical",
+      "description": "Default admin credentials in use",
+      "url": "http://testphp.vulnweb.com/admin/",
+      "evidence": "admin:admin credentials work",
+      "recommendation": "Change default credentials immediately",
+      "cve": "CVE-2021-1234",
+      "category": "Authentication Bypass"
+    },
+    {
+      "id": "N-008",
+      "title": "SQL injection vulnerability",
+      "severity": "Critical",
+      "description": "SQL injection in login form",
+      "url": "http://testphp.vulnweb.com/login.php",
+      "evidence": "SQL error messages returned",
+      "recommendation": "Use parameterized queries",
+      "cve": "CVE-2021-5678",
+      "category": "SQL Injection"
+    },
+    {
+      "id": "N-009",
+      "title": "Cross-site scripting vulnerability",
+      "severity": "High",
+      "description": "XSS in search parameter",
+      "url": "http://testphp.vulnweb.com/search.php",
+      "evidence": "Script tags reflected in response",
+      "recommendation": "Implement output encoding",
+      "cve": "CVE-2021-9012",
+      "category": "Cross-Site Scripting"
+    },
+    {
+      "id": "N-010",
+      "title": "File upload vulnerability",
+      "severity": "High",
+      "description": "Unrestricted file upload",
+      "url": "http://testphp.vulnweb.com/upload.php",
+      "evidence": "PHP files can be uploaded",
+      "recommendation": "Implement file type validation",
+      "cve": "CVE-2021-3456",
+      "category": "File Upload"
+    }
+  ],
+  "summary": {
+    "total_findings": 10,
+    "critical_count": 2,
+    "high_count": 3,
+    "medium_count": 3,
+    "low_count": 2
+  }
+}

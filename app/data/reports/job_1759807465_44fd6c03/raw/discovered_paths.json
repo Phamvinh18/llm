@@ -1,0 +1,16 @@
+[
+  {
+    "path": "/admin",
+    "url": "http://testphp.vulnweb.com/admin",
+    "status_code": 200,
+    "content_length": 262,
+    "content_type": "text/html"
+  },
+  {
+    "path": "/crossdomain.xml",
+    "url": "http://testphp.vulnweb.com/crossdomain.xml",
+    "status_code": 200,
+    "content_length": 224,
+    "content_type": "text/xml"
+  }
+]

@@ -1,0 +1,43 @@
+{
+  "security_headers": {
+    "Content-Security-Policy": {
+      "present": false,
+      "value": "",
+      "score": 0
+    },
+    "X-Frame-Options": {
+      "present": false,
+      "value": "",
+      "score": 0
+    },
+    "X-Content-Type-Options": {
+      "present": false,
+      "value": "",
+      "score": 0
+    },
+    "Strict-Transport-Security": {
+      "present": false,
+      "value": "",
+      "score": 0
+    },
+    "X-XSS-Protection": {
+      "present": false,
+      "value": "",
+      "score": 0
+    },
+    "Referrer-Policy": {
+      "present": false,
+      "value": "",
+      "score": 0
+    }
+  },
+  "security_score": 0.0,
+  "suspicious_headers": [
+    {
+      "header": "Server",
+      "value": "nginx/1.19.0",
+      "issue": "Version disclosure"
+    }
+  ],
+  "total_headers": 7
+}

