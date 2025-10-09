@@ -5,7 +5,7 @@ API endpoints for Chat Assistant RAG System
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
-from app.core.chat_assistant_rag import ChatAssistantRAG, ChatResponse
+from app.core.chat_assistant_simple import ChatAssistantSimple, ChatResponse
 
 router = APIRouter()
 
@@ -28,7 +28,7 @@ async def chat_with_assistant(message: ChatMessage):
         start_time = time.time()
         
         # Initialize chat assistant
-        chat_assistant = ChatAssistantRAG()
+        chat_assistant = ChatAssistantSimple()
         
         # Process message
         response = await chat_assistant.process_message(
@@ -41,8 +41,8 @@ async def chat_with_assistant(message: ChatMessage):
         # Convert ChatResponse to dict
         response_dict = {
             "message": response.message,
-            "command": response.command.value,
-            "vulnerability_type": response.vulnerability_type.value if response.vulnerability_type else None,
+            "command": response.command,
+            "vulnerability_type": response.vulnerability_type,
             "target_url": response.target_url,
             "payloads": response.payloads,
             "scan_results": response.scan_results,
@@ -62,13 +62,39 @@ async def chat_with_assistant(message: ChatMessage):
 @router.post('/payload')
 async def generate_payloads(message: ChatMessage):
     """
-    Generate payloads cho lỗ hổng
+    Generate enhanced payloads cho lỗ hổng với advanced features
     """
     try:
-        chat_assistant = ChatAssistantRAG()
+        chat_assistant = ChatAssistantSimple()
         
-        # Process payload command
+        # Process enhanced payload command
         response = await chat_assistant.process_message(f"/payload {message.message}")
+        
+        # Additional payload suggestions from payload suggester
+        enhanced_payloads = []
+        if response.target_url and response.vulnerability_type:
+            try:
+                from app.core.payload_suggester import suggest_payloads
+                baseline_finding = {
+                    'title': response.vulnerability_type.value,
+                    'url': response.target_url,
+                    'parameter': 'test'
+                }
+                enhanced_payloads = suggest_payloads(baseline_finding, response.vulnerability_type.value)
+            except Exception as e:
+                print(f"Error getting enhanced payloads: {e}")
+        
+        # Generate test URLs
+        test_urls = []
+        if response.target_url and response.payloads:
+            try:
+                import urllib.parse
+                for payload in response.payloads[:3]:  # Top 3 payloads
+                    encoded_payload = urllib.parse.quote(payload)
+                    test_url = f"{response.target_url}?test={encoded_payload}"
+                    test_urls.append(test_url)
+            except Exception as e:
+                print(f"Error generating test URLs: {e}")
         
         return {
             "success": True,
@@ -76,12 +102,16 @@ async def generate_payloads(message: ChatMessage):
             "vulnerability_type": response.vulnerability_type.value if response.vulnerability_type else None,
             "target_url": response.target_url,
             "payloads": response.payloads,
+            "enhanced_payloads": enhanced_payloads[:5] if enhanced_payloads else [],  # Top 5 enhanced payloads
+            "test_urls": test_urls,
             "message": response.message,
-            "suggestions": response.suggestions
+            "suggestions": response.suggestions,
+            "payload_count": len(response.payloads) if response.payloads else 0,
+            "enhanced_count": len(enhanced_payloads) if enhanced_payloads else 0
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Payload generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Enhanced payload generation failed: {str(e)}")
 
 @router.post('/scan')
 async def scan_target(message: ChatMessage):
@@ -89,7 +119,7 @@ async def scan_target(message: ChatMessage):
     Scan target URL
     """
     try:
-        chat_assistant = ChatAssistantRAG()
+        chat_assistant = ChatAssistantSimple()
         
         # Process scan command
         response = await chat_assistant.process_message(f"/scan {message.message}")
@@ -113,7 +143,7 @@ async def get_help():
     Get help information
     """
     try:
-        chat_assistant = ChatAssistantRAG()
+        chat_assistant = ChatAssistantSimple()
         
         # Get help response
         response = await chat_assistant.process_message("/help")
@@ -210,7 +240,7 @@ async def get_vulnerability_info():
     Get vulnerability information from RAG
     """
     try:
-        chat_assistant = ChatAssistantRAG()
+        chat_assistant = ChatAssistantSimple()
         vulnerability_rag = chat_assistant.vulnerability_rag
         
         return {

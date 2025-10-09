@@ -1,18 +1,18 @@
 """
-Scan Orchestrator - Quản lý pipeline scan chuyên nghiệp với tools thực tế
+Scan Orchestrator - Quản lý scan jobs và tool execution pipeline
 """
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 from enum import Enum
 import subprocess
-import os
-from urllib.parse import urlparse
 import requests
+from pathlib import Path
 
 class ScanStatus(Enum):
     PENDING = "pending"
@@ -27,8 +27,8 @@ class ScanStage(Enum):
     CRAWL = "crawl"
     FUZZ = "fuzz"
     VULN_SCAN = "vulnerability_scan"
-    AGGREGATION = "aggregation"
-    LLM_ENRICHMENT = "llm_enrichment"
+    CONFIRMATION = "confirmation"
+    RAG_ENRICHMENT = "rag_enrichment"
     COMPLETED = "completed"
 
 @dataclass
@@ -37,62 +37,58 @@ class ScanJob:
     target_url: str
     status: ScanStatus
     current_stage: ScanStage
-    progress: int  # 0-100
+    progress: int
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     error_message: Optional[str] = None
     findings: List[Dict[str, Any]] = None
-    summary: Optional[str] = None
-    report_url: Optional[str] = None
-    raw_outputs: Dict[str, Any] = None
+    raw_outputs: Dict[str, str] = None
+    evidence_dir: Optional[str] = None
 
 @dataclass
-class ScanFinding:
-    id: str
-    type: str
-    path: str
-    param: Optional[str]
-    evidence: str
-    tool: str
-    severity: str
-    poc: str
-    remediation: str
-    confidence: float
+class ToolResult:
+    tool_name: str
+    command: str
+    output_file: str
+    exit_code: int
+    duration: float
+    findings_count: int
+    error_message: Optional[str] = None
 
 class ScanOrchestrator:
-    """Orchestrator quản lý pipeline scan chuyên nghiệp"""
+    """Orchestrator quản lý scan pipeline với evidence storage"""
     
     def __init__(self):
         self.active_jobs: Dict[str, ScanJob] = {}
+        self.reports_dir = Path("reports")
+        self.reports_dir.mkdir(exist_ok=True)
         self.allowlist = self._load_allowlist()
-        self.scan_tools = ScanTools()
-        self.result_aggregator = ResultAggregator()
-        self.llm_enricher = LLMEnricher()
         
     def _load_allowlist(self) -> List[str]:
-        """Load allowlist từ file"""
+        """Load allowlist for safe targets"""
         try:
             with open('app/data/whitelist.json', 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 return data.get('allowed_targets', [])
         except:
-            return ['testphp.vulnweb.com', 'demo.testfire.net', 'localhost']
+            return ['testphp.vulnweb.com', 'demo.testfire.net', 'localhost', 'httpbin.org']
     
-    async def start_scan(self, target_url: str, user_id: str = "default") -> Dict[str, Any]:
-        """Bắt đầu scan job"""
+    async def start_scan(self, target_url: str) -> Dict[str, Any]:
+        """Start a new scan job"""
         try:
-            # 1. Validation
-            validation_result = await self._validate_target(target_url)
-            if not validation_result['valid']:
+            # Validate target
+            if not self._is_target_allowed(target_url):
                 return {
-                    'success': False,
-                    'error': validation_result['error'],
-                    'job_id': None
+                    "success": False,
+                    "error": f"Target {target_url} not in allowlist"
                 }
             
-            # 2. Tạo job
+            # Create job
             job_id = f"job_{uuid.uuid4().hex[:8]}"
+            evidence_dir = self.reports_dir / job_id / "raw"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            
             job = ScanJob(
                 job_id=job_id,
                 target_url=target_url,
@@ -100,452 +96,546 @@ class ScanOrchestrator:
                 current_stage=ScanStage.VALIDATION,
                 progress=0,
                 created_at=time.strftime('%Y-%m-%d %H:%M:%S'),
-                findings=[],
-                raw_outputs={}
+                evidence_dir=str(evidence_dir),
+                raw_outputs={},
+                findings=[]
             )
             
             self.active_jobs[job_id] = job
             
-            # 3. Start scan pipeline (async)
-            asyncio.create_task(self._run_scan_pipeline(job_id))
+            # Start scan pipeline in background
+            asyncio.create_task(self._run_scan_pipeline(job))
             
             return {
-                'success': True,
-                'job_id': job_id,
-                'message': f"Scan job đã được tạo. Job ID: {job_id}",
-                'estimated_time': "5-10 phút"
+                "success": True,
+                "job_id": job_id,
+                "message": f"Scan started for {target_url}",
+                "estimated_time": "5-10 minutes",
+                "evidence_dir": str(evidence_dir)
             }
             
         except Exception as e:
             return {
-                'success': False,
-                'error': f"Lỗi tạo scan job: {str(e)}",
-                'job_id': None
+                "success": False,
+                "error": str(e)
             }
     
-    async def _validate_target(self, target_url: str) -> Dict[str, Any]:
-        """Validate target URL"""
+    def _is_target_allowed(self, target_url: str) -> bool:
+        """Check if target is in allowlist"""
+        from urllib.parse import urlparse
         try:
-            # Parse URL
             parsed = urlparse(target_url)
-            if not parsed.scheme or not parsed.netloc:
-                return {'valid': False, 'error': 'URL không hợp lệ'}
-            
-            # Check scheme
-            if parsed.scheme not in ['http', 'https']:
-                return {'valid': False, 'error': 'Chỉ hỗ trợ HTTP/HTTPS'}
-            
-            # Check allowlist
             domain = parsed.netloc.lower()
-            if not any(allowed in domain for allowed in self.allowlist):
-                return {'valid': False, 'error': f'Domain {domain} không có trong allowlist'}
-            
-            # Check if target is reachable
-            try:
-                response = requests.head(target_url, timeout=10, allow_redirects=True)
-                if response.status_code >= 400:
-                    return {'valid': False, 'error': f'Target không thể truy cập (Status: {response.status_code})'}
-            except:
-                return {'valid': False, 'error': 'Target không thể truy cập'}
-            
-            return {'valid': True, 'error': None}
-            
-        except Exception as e:
-            return {'valid': False, 'error': f'Lỗi validation: {str(e)}'}
+            return any(allowed in domain for allowed in self.allowlist)
+        except:
+            return False
     
-    async def _run_scan_pipeline(self, job_id: str):
-        """Chạy pipeline scan"""
+    async def _run_scan_pipeline(self, job: ScanJob):
+        """Run the complete scan pipeline"""
         try:
-            job = self.active_jobs[job_id]
             job.status = ScanStatus.RUNNING
             job.started_at = time.strftime('%Y-%m-%d %H:%M:%S')
             
             # Stage 1: Reconnaissance
-            await self._update_job_progress(job_id, ScanStage.RECON, 10)
-            recon_results = await self.scan_tools.run_reconnaissance(job.target_url)
-            job.raw_outputs['recon'] = recon_results
+            job.current_stage = ScanStage.RECON
+            job.progress = 10
+            recon_results = await self._run_reconnaissance(job)
             
-            # Stage 2: Crawl
-            await self._update_job_progress(job_id, ScanStage.CRAWL, 25)
-            crawl_results = await self.scan_tools.run_crawl(job.target_url)
-            job.raw_outputs['crawl'] = crawl_results
+            # Stage 2: Crawling
+            job.current_stage = ScanStage.CRAWL
+            job.progress = 30
+            crawl_results = await self._run_crawling(job)
             
-            # Stage 3: Directory Fuzzing
-            await self._update_job_progress(job_id, ScanStage.FUZZ, 40)
-            fuzz_results = await self.scan_tools.run_directory_fuzzing(job.target_url)
-            job.raw_outputs['fuzz'] = fuzz_results
+            # Stage 3: Fuzzing
+            job.current_stage = ScanStage.FUZZ
+            job.progress = 50
+            fuzz_results = await self._run_fuzzing(job)
             
             # Stage 4: Vulnerability Scanning
-            await self._update_job_progress(job_id, ScanStage.VULN_SCAN, 60)
-            vuln_results = await self.scan_tools.run_vulnerability_scan(job.target_url)
-            job.raw_outputs['vulnerability_scan'] = vuln_results
+            job.current_stage = ScanStage.VULN_SCAN
+            job.progress = 70
+            vuln_results = await self._run_vulnerability_scan(job)
             
-            # Stage 5: Aggregation
-            await self._update_job_progress(job_id, ScanStage.AGGREGATION, 80)
-            findings = await self.result_aggregator.aggregate_results(job.raw_outputs, job.target_url)
-            job.findings = findings
+            # Stage 5: Confirmatory Tests
+            job.current_stage = ScanStage.CONFIRMATION
+            job.progress = 85
+            confirmation_results = await self._run_confirmatory_tests(job)
             
-            # Stage 6: LLM Enrichment
-            await self._update_job_progress(job_id, ScanStage.LLM_ENRICHMENT, 90)
-            enriched_results = await self.llm_enricher.enrich_findings(findings, job.target_url)
-            job.summary = enriched_results['summary']
-            job.findings = enriched_results['findings']
+            # Stage 6: RAG Enrichment
+            job.current_stage = ScanStage.RAG_ENRICHMENT
+            job.progress = 95
+            enriched_findings = await self._run_rag_enrichment(job)
             
             # Complete
-            await self._update_job_progress(job_id, ScanStage.COMPLETED, 100)
+            job.current_stage = ScanStage.COMPLETED
+            job.progress = 100
             job.status = ScanStatus.COMPLETED
             job.completed_at = time.strftime('%Y-%m-%d %H:%M:%S')
+            job.findings = enriched_findings
             
         except Exception as e:
-            job = self.active_jobs[job_id]
             job.status = ScanStatus.FAILED
             job.error_message = str(e)
-            job.completed_at = time.strftime('%Y-%m-%d %H:%M:%S')
+            print(f"Scan pipeline failed for {job.job_id}: {e}")
     
-    async def _update_job_progress(self, job_id: str, stage: ScanStage, progress: int):
-        """Update job progress"""
-        if job_id in self.active_jobs:
-            job = self.active_jobs[job_id]
-            job.current_stage = stage
-            job.progress = progress
-    
-    def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Get job status"""
-        if job_id not in self.active_jobs:
-            return None
+    async def _run_reconnaissance(self, job: ScanJob) -> Dict[str, Any]:
+        """Run reconnaissance tools"""
+        results = {}
+        evidence_dir = Path(job.evidence_dir)
         
-        job = self.active_jobs[job_id]
-        return {
-            'job_id': job.job_id,
-            'target_url': job.target_url,
-            'status': job.status.value,
-            'current_stage': job.current_stage.value,
-            'progress': job.progress,
-            'created_at': job.created_at,
-            'started_at': job.started_at,
-            'completed_at': job.completed_at,
-            'error_message': job.error_message,
-            'summary': job.summary,
-            'findings_count': len(job.findings) if job.findings else 0
-        }
-    
-    def get_job_results(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Get complete job results"""
-        if job_id not in self.active_jobs:
-            return None
-        
-        job = self.active_jobs[job_id]
-        if job.status != ScanStatus.COMPLETED:
-            return None
-        
-        return {
-            'job_id': job.job_id,
-            'target_url': job.target_url,
-            'summary': job.summary,
-            'findings': [asdict(finding) if hasattr(finding, '__dataclass_fields__') else finding for finding in job.findings],
-            'raw_outputs': job.raw_outputs,
-            'scan_duration': self._calculate_duration(job.started_at, job.completed_at),
-            'report_url': job.report_url
-        }
-    
-    def _calculate_duration(self, started: str, completed: str) -> str:
-        """Calculate scan duration"""
-        try:
-            start_time = time.strptime(started, '%Y-%m-%d %H:%M:%S')
-            end_time = time.strptime(completed, '%Y-%m-%d %H:%M:%S')
-            duration = time.mktime(end_time) - time.mktime(start_time)
-            return f"{int(duration // 60)}m {int(duration % 60)}s"
-        except:
-            return "Unknown"
-
-class ScanTools:
-    """Container cho các security tools"""
-    
-    def __init__(self):
-        from app.core.security_tools import SecurityToolsManager
-        self.tools_manager = SecurityToolsManager()
-        self.tools_available = self.tools_manager.get_available_tools()
-    
-    async def run_reconnaissance(self, target_url: str) -> Dict[str, Any]:
-        """Chạy reconnaissance"""
-        return self.tools_manager.run_reconnaissance(target_url)
-    
-    async def run_crawl(self, target_url: str) -> Dict[str, Any]:
-        """Chạy crawling"""
-        return self.tools_manager.run_crawling(target_url)
-    
-    async def run_directory_fuzzing(self, target_url: str) -> Dict[str, Any]:
-        """Chạy directory fuzzing"""
-        return self.tools_manager.run_directory_fuzzing(target_url)
-    
-    async def run_vulnerability_scan(self, target_url: str) -> Dict[str, Any]:
-        """Chạy vulnerability scanning"""
-        return self.tools_manager.run_vulnerability_scanning(target_url)
-
-class ResultAggregator:
-    """Aggregate và normalize kết quả từ các tools"""
-    
-    def __init__(self):
-        self.finding_id_counter = 1
-    
-    async def aggregate_results(self, raw_outputs: Dict[str, Any], target_url: str) -> List[ScanFinding]:
-        """Aggregate results từ tất cả tools"""
-        findings = []
-        
-        # Parse nuclei results
-        if 'vulnerability_scan' in raw_outputs and 'nuclei' in raw_outputs['vulnerability_scan']:
-            nuclei_results = raw_outputs['vulnerability_scan']['nuclei']
-            if nuclei_results.get('success') and nuclei_results.get('findings'):
-                for finding in nuclei_results['findings']:
-                    findings.append(self._parse_nuclei_finding(finding))
-        
-        # Parse dalfox results
-        if 'vulnerability_scan' in raw_outputs and 'dalfox' in raw_outputs['vulnerability_scan']:
-            dalfox_results = raw_outputs['vulnerability_scan']['dalfox']
-            if dalfox_results.get('success') and dalfox_results.get('findings'):
-                for finding in dalfox_results['findings']:
-                    findings.append(self._parse_dalfox_finding(finding))
-        
-        # Parse nikto results
-        if 'vulnerability_scan' in raw_outputs and 'nikto' in raw_outputs['vulnerability_scan']:
-            nikto_results = raw_outputs['vulnerability_scan']['nikto']
-            if nikto_results.get('success') and nikto_results.get('output'):
-                findings.extend(self._parse_nikto_results(nikto_results['output']))
-        
-        # Parse ffuf results
-        if 'fuzz' in raw_outputs and 'ffuf' in raw_outputs['fuzz']:
-            ffuf_results = raw_outputs['fuzz']['ffuf']
-            if ffuf_results.get('success') and ffuf_results.get('results'):
-                findings.extend(self._parse_ffuf_results(ffuf_results['results']))
-        
-        # Parse basic fuzz results
-        if 'fuzz' in raw_outputs and 'basic_fuzz' in raw_outputs['fuzz']:
-            basic_fuzz_results = raw_outputs['fuzz']['basic_fuzz']
-            if basic_fuzz_results.get('success') and basic_fuzz_results.get('results'):
-                findings.extend(self._parse_basic_fuzz_results(basic_fuzz_results['results']))
-        
-        return findings
-    
-    def _parse_nuclei_finding(self, finding: Dict[str, Any]) -> ScanFinding:
-        """Parse nuclei finding"""
-        self.finding_id_counter += 1
-        return ScanFinding(
-            id=f"f{self.finding_id_counter}",
-            type=finding.get('info', {}).get('name', 'Unknown'),
-            path=finding.get('matched-at', ''),
-            param=None,
-            evidence=finding.get('request', ''),
-            tool='nuclei',
-            severity=self._map_nuclei_severity(finding.get('info', {}).get('severity', 'info')),
-            poc=f"1) Visit {finding.get('matched-at', '')}\n2) Tool: nuclei\n3) Template: {finding.get('template-id', '')}",
-            remediation="Xem chi tiết trong nuclei template",
-            confidence=0.8
+        # HTTPX - Basic HTTP analysis
+        httpx_result = await self._run_tool(
+            f"httpx -timeout 30 -silent -json -o {evidence_dir}/httpx.json {job.target_url}",
+            "httpx",
+            evidence_dir / "httpx.json"
         )
-    
-    def _parse_dalfox_finding(self, finding: Dict[str, Any]) -> ScanFinding:
-        """Parse dalfox finding"""
-        self.finding_id_counter += 1
-        return ScanFinding(
-            id=f"f{self.finding_id_counter}",
-            type='XSS',
-            path=finding.get('url', ''),
-            param=finding.get('param', ''),
-            evidence=finding.get('payload', ''),
-            tool='dalfox',
-            severity='High',
-            poc=f"1) Visit {finding.get('url', '')}\n2) Parameter: {finding.get('param', '')}\n3) Payload: {finding.get('payload', '')}",
-            remediation="Implement proper input validation and output encoding",
-            confidence=0.9
+        results["httpx"] = httpx_result
+        
+        # WhatWeb - Technology detection
+        whatweb_result = await self._run_tool(
+            f"whatweb -a 3 {job.target_url} -o {evidence_dir}/whatweb.json",
+            "whatweb",
+            evidence_dir / "whatweb.json"
         )
-    
-    def _parse_nikto_results(self, output: str) -> List[ScanFinding]:
-        """Parse nikto results"""
-        findings = []
-        lines = output.split('\n')
+        results["whatweb"] = whatweb_result
         
-        for line in lines:
-            if 'OSVDB-' in line or 'CVE-' in line:
-                self.finding_id_counter += 1
-                findings.append(ScanFinding(
-                    id=f"f{self.finding_id_counter}",
-                    type='Information Disclosure',
-                    path='',
-                    param=None,
-                    evidence=line.strip(),
-                    tool='nikto',
-                    severity='Medium',
-                    poc=f"1) Run nikto scan\n2) Check output\n3) Tool: nikto",
-                    remediation="Review and secure server configuration",
-                    confidence=0.7
-                ))
+        return results
+    
+    async def _run_crawling(self, job: ScanJob) -> Dict[str, Any]:
+        """Run crawling tools"""
+        results = {}
+        evidence_dir = Path(job.evidence_dir)
         
-        return findings
+        # GoSpider - Fast crawling
+        gospider_result = await self._run_tool(
+            f"gospider -s {job.target_url} -o {evidence_dir}/gospider.json -t 10",
+            "gospider",
+            evidence_dir / "gospider.json"
+        )
+        results["gospider"] = gospider_result
+        
+        return results
     
-    def _parse_ffuf_results(self, results: List[Dict[str, Any]]) -> List[ScanFinding]:
-        """Parse ffuf results"""
-        findings = []
-        for result in results:
-            if result.get('status') in [200, 301, 302, 403]:
-                self.finding_id_counter += 1
-                findings.append(ScanFinding(
-                    id=f"f{self.finding_id_counter}",
-                    type='Directory/File Discovery',
-                    path=result.get('url', ''),
-                    param=None,
-                    evidence=f"Status: {result.get('status')}, Size: {result.get('length')}",
-                    tool='ffuf',
-                    severity='Low',
-                    poc=f"1) Visit {result.get('url', '')}\n2) Check response\n3) Tool: ffuf",
-                    remediation="Review discovered paths and remove unnecessary files",
-                    confidence=0.9
-                ))
-        return findings
+    async def _run_fuzzing(self, job: ScanJob) -> Dict[str, Any]:
+        """Run fuzzing tools"""
+        results = {}
+        evidence_dir = Path(job.evidence_dir)
+        
+        # FFUF - Directory fuzzing
+        ffuf_result = await self._run_tool(
+            f"ffuf -u {job.target_url}/FUZZ -w /usr/share/wordlists/dirb/common.txt -o {evidence_dir}/ffuf.json -mc 200,301,302 -json",
+            "ffuf",
+            evidence_dir / "ffuf.json"
+        )
+        results["ffuf"] = ffuf_result
+        
+        return results
     
-    def _parse_basic_fuzz_results(self, results: List[Dict[str, Any]]) -> List[ScanFinding]:
-        """Parse basic fuzz results"""
-        findings = []
-        for result in results:
-            if result.get('status') in [200, 301, 302, 403]:
-                self.finding_id_counter += 1
-                findings.append(ScanFinding(
-                    id=f"f{self.finding_id_counter}",
-                    type='Directory/File Discovery',
-                    path=result.get('url', ''),
-                    param=None,
-                    evidence=f"Status: {result.get('status')}, Length: {result.get('length')}",
-                    tool='basic_fuzz',
-                    severity='Low',
-                    poc=f"1) Visit {result.get('url', '')}\n2) Check response\n3) Tool: basic HTTP requests",
-                    remediation="Review discovered paths and remove unnecessary files",
-                    confidence=0.8
-                ))
-        return findings
+    async def _run_vulnerability_scan(self, job: ScanJob) -> Dict[str, Any]:
+        """Run vulnerability scanning tools"""
+        results = {}
+        evidence_dir = Path(job.evidence_dir)
+        
+        # Nuclei - Template-based scanning
+        nuclei_result = await self._run_tool(
+            f"nuclei -u {job.target_url} -t /nuclei-templates/ -json -o {evidence_dir}/nuclei.json",
+            "nuclei",
+            evidence_dir / "nuclei.json"
+        )
+        results["nuclei"] = nuclei_result
+        
+        # Dalfox - XSS scanning
+        dalfox_result = await self._run_tool(
+            f"dalfox url {job.target_url} --basic-payloads -o {evidence_dir}/dalfox.json --format json",
+            "dalfox",
+            evidence_dir / "dalfox.json"
+        )
+        results["dalfox"] = dalfox_result
+        
+        # Nikto - Web server scanning
+        nikto_result = await self._run_tool(
+            f"nikto -h {job.target_url} -Format json -output {evidence_dir}/nikto.json",
+            "nikto",
+            evidence_dir / "nikto.json"
+        )
+        results["nikto"] = nikto_result
+        
+        return results
     
-    def _map_nuclei_severity(self, severity: str) -> str:
-        """Map nuclei severity to standard severity"""
-        mapping = {
-            'critical': 'Critical',
-            'high': 'High',
-            'medium': 'Medium',
-            'low': 'Low',
-            'info': 'Info'
-        }
-        return mapping.get(severity.lower(), 'Medium')
-
-class LLMEnricher:
-    """LLM enrichment cho findings"""
+    async def _run_confirmatory_tests(self, job: ScanJob) -> Dict[str, Any]:
+        """Run confirmatory tests to reduce false positives"""
+        results = {}
+        evidence_dir = Path(job.evidence_dir)
+        
+        # Run marker reflection tests for each finding
+        findings = self._parse_all_findings(job)
+        for finding in findings:
+            if finding.get('type') == 'XSS':
+                confirm_result = await self._test_marker_reflection(
+                    job.target_url, 
+                    finding.get('path', ''), 
+                    finding.get('param', ''),
+                    evidence_dir
+                )
+                finding['confirmatory_tests'] = confirm_result
+        
+        return results
     
-    def __init__(self):
-        from app.clients.gemini_client import GeminiClient
-        self.llm_client = GeminiClient()
-        self.rag_retriever = self._init_rag_retriever()
-    
-    def _init_rag_retriever(self):
-        """Initialize RAG retriever"""
+    async def _run_rag_enrichment(self, job: ScanJob) -> List[Dict[str, Any]]:
+        """Run RAG enrichment on findings"""
         try:
-            from app.core.kb_retriever import AdvancedKBRetriever
-            return AdvancedKBRetriever()
-        except:
-            return None
-    
-    async def enrich_findings(self, findings: List[ScanFinding], target_url: str) -> Dict[str, Any]:
-        """Enrich findings với LLM và RAG"""
-        try:
-            # Prepare findings data
-            findings_data = []
+            from app.core.enhanced_rag_retriever import EnhancedRAGRetriever
+            from app.clients.gemini_client import GeminiClient
+            
+            rag_retriever = EnhancedRAGRetriever()
+            llm_client = GeminiClient()
+            
+            findings = self._parse_all_findings(job)
+            enriched_findings = []
+            
             for finding in findings:
-                findings_data.append({
-                    'id': finding.id,
-                    'type': finding.type,
-                    'path': finding.path,
-                    'param': finding.param,
-                    'evidence': finding.evidence,
-                    'tool': finding.tool,
-                    'severity': finding.severity,
-                    'poc': finding.poc,
-                    'remediation': finding.remediation,
-                    'confidence': finding.confidence
-                })
+                # Get RAG context
+                rag_context = self._get_rag_context_for_finding(finding, rag_retriever)
+                
+                # Enrich with LLM
+                enriched_finding = await self._enrich_finding_with_llm(
+                    finding, rag_context, llm_client
+                )
+                
+                enriched_findings.append(enriched_finding)
             
-            # Get RAG context
-            rag_context = ""
-            if self.rag_retriever:
-                try:
-                    rag_docs = self.rag_retriever.retrieve("vulnerability remediation", k=5)
-                    if rag_docs:
-                        rag_context = "\n".join([doc.content for doc in rag_docs[:3]])
-                except:
-                    pass
+            return enriched_findings
             
-            # Create LLM prompt
-            prompt = f"""
-            Bạn là chuyên gia bảo mật web. Hãy phân tích kết quả scan và tạo báo cáo chuyên nghiệp.
+        except Exception as e:
+            print(f"RAG enrichment error: {e}")
+            return self._parse_all_findings(job)
+    
+    async def _run_tool(self, command: str, tool_name: str, output_file: Path) -> ToolResult:
+        """Run a security tool and capture results"""
+        start_time = time.time()
+        
+        try:
+            # Run command in subprocess
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
             
-            Target: {target_url}
-            Findings: {json.dumps(findings_data, ensure_ascii=False, indent=2)}
+            stdout, stderr = await process.communicate()
+            duration = time.time() - start_time
             
-            RAG Context (Remediation Knowledge):
-            {rag_context}
+            # Save output
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(stdout.decode('utf-8', errors='ignore'))
             
-            Hãy tạo:
-            1. Executive Summary (2-3 câu tóm tắt)
-            2. Cải thiện severity assessment cho từng finding
-            3. Tạo PoC chi tiết và an toàn
-            4. Cải thiện remediation steps với code examples
-            5. Top 5 actions cần thực hiện ngay
+            # Parse findings count
+            findings_count = self._count_findings_in_output(stdout.decode('utf-8', errors='ignore'))
             
-            Trả về JSON format:
-            {{
-                "summary": "Executive summary",
-                "findings": [
-                    {{
-                        "id": "f1",
-                        "type": "XSS",
-                        "path": "/path",
-                        "param": "param",
-                        "evidence": "evidence",
-                        "tool": "tool",
-                        "severity": "High",
-                        "poc": "Detailed PoC steps",
-                        "remediation": "Detailed remediation with code examples",
-                        "confidence": 0.9
-                    }}
-                ],
-                "actions": [
-                    "Action 1",
-                    "Action 2"
-                ]
-            }}
-            """
+            return ToolResult(
+                tool_name=tool_name,
+                command=command,
+                output_file=str(output_file),
+                exit_code=process.returncode,
+                duration=duration,
+                findings_count=findings_count,
+                error_message=stderr.decode('utf-8', errors='ignore') if stderr else None
+            )
             
-            # Get LLM response
-            llm_response = self.llm_client.chat(prompt, max_output_tokens=2000)
+        except Exception as e:
+            return ToolResult(
+                tool_name=tool_name,
+                command=command,
+                output_file=str(output_file),
+                exit_code=-1,
+                duration=time.time() - start_time,
+                findings_count=0,
+                error_message=str(e)
+            )
+    
+    def _count_findings_in_output(self, output: str) -> int:
+        """Count findings in tool output"""
+        try:
+            # Simple heuristic - count JSON objects or specific patterns
+            if 'nuclei' in output.lower():
+                return output.count('"info"')
+            elif 'dalfox' in output.lower():
+                return output.count('"payload"')
+            elif 'nikto' in output.lower():
+                return output.count('"vulnerability"')
+            else:
+                return output.count('"finding"') + output.count('"vulnerability"')
+        except:
+            return 0
+    
+    def _parse_all_findings(self, job: ScanJob) -> List[Dict[str, Any]]:
+        """Parse findings from all tool outputs"""
+        findings = []
+        evidence_dir = Path(job.evidence_dir)
+        
+        # Parse each tool output
+        for tool_file in evidence_dir.glob("*.json"):
+            tool_findings = self._parse_tool_output(tool_file, job.target_url)
+            findings.extend(tool_findings)
+        
+        return findings
+    
+    def _parse_tool_output(self, output_file: Path, target_url: str) -> List[Dict[str, Any]]:
+        """Parse individual tool output"""
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                content = f.read()
             
-            try:
-                # Try to parse JSON response
-                enriched_data = json.loads(llm_response)
-                return enriched_data
-            except:
-                # Fallback if JSON parsing fails
-                return {
-                    'summary': llm_response[:500] + "..." if len(llm_response) > 500 else llm_response,
-                    'findings': findings_data,
-                    'actions': [
-                        "Review all findings manually",
-                        "Implement security headers",
-                        "Fix input validation issues",
-                        "Update server configuration",
-                        "Conduct penetration testing"
-                    ]
-                }
+            tool_name = output_file.stem
+            
+            if tool_name == "nuclei":
+                return self._parse_nuclei_output(content, target_url, str(output_file))
+            elif tool_name == "dalfox":
+                return self._parse_dalfox_output(content, target_url, str(output_file))
+            elif tool_name == "nikto":
+                return self._parse_nikto_output(content, target_url, str(output_file))
+            else:
+                return []
                 
         except Exception as e:
-            return {
-                'summary': f"Scan completed with {len(findings)} findings. LLM enrichment failed: {str(e)}",
-                'findings': [asdict(finding) for finding in findings],
-                'actions': [
-                    "Review findings manually",
-                    "Implement security best practices",
-                    "Conduct additional testing"
-                ]
-            }
+            print(f"Error parsing {output_file}: {e}")
+            return []
+    
+    def _parse_nuclei_output(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
+        """Parse Nuclei output"""
+        findings = []
+        try:
+            lines = content.strip().split('\n')
+            for line in lines:
+                if line.strip():
+                    data = json.loads(line)
+                    finding = {
+                        "id": f"f-{len(findings)+1:03d}",
+                        "job_id": "temp",
+                        "target": target_url,
+                        "type": data.get("info", {}).get("name", "Unknown"),
+                        "path": data.get("matched-at", ""),
+                        "param": "",
+                        "tool": "nuclei",
+                        "severity": None,
+                        "confidence": None,
+                        "cvss_v3": None,
+                        "exploitability_score": None,
+                        "evidence_snippet": data.get("request", "")[:500],
+                        "raw_outputs": [output_file],
+                        "request_response": "",
+                        "screenshot": "",
+                        "confirmatory_tests": [],
+                        "related_domains": [],
+                        "exploit_vectors": [],
+                        "remediation_suggestions": [],
+                        "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    }
+                    findings.append(finding)
+        except Exception as e:
+            print(f"Error parsing nuclei output: {e}")
+        
+        return findings
+    
+    def _parse_dalfox_output(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
+        """Parse Dalfox output"""
+        findings = []
+        try:
+            data = json.loads(content)
+            for item in data:
+                finding = {
+                    "id": f"f-{len(findings)+1:03d}",
+                    "job_id": "temp",
+                    "target": target_url,
+                    "type": "XSS-Reflected",
+                    "path": item.get("url", ""),
+                    "param": item.get("param", ""),
+                    "tool": "dalfox",
+                    "severity": None,
+                    "confidence": None,
+                    "cvss_v3": None,
+                    "exploitability_score": None,
+                    "evidence_snippet": item.get("payload", ""),
+                    "raw_outputs": [output_file],
+                    "request_response": "",
+                    "screenshot": "",
+                    "confirmatory_tests": [],
+                    "related_domains": [],
+                    "exploit_vectors": [],
+                    "remediation_suggestions": [],
+                    "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                }
+                findings.append(finding)
+        except Exception as e:
+            print(f"Error parsing dalfox output: {e}")
+        
+        return findings
+    
+    def _parse_nikto_output(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
+        """Parse Nikto output"""
+        findings = []
+        try:
+            data = json.loads(content)
+            for item in data.get("vulnerabilities", []):
+                finding = {
+                    "id": f"f-{len(findings)+1:03d}",
+                    "job_id": "temp",
+                    "target": target_url,
+                    "type": "Security-Misconfiguration",
+                    "path": item.get("url", ""),
+                    "param": "",
+                    "tool": "nikto",
+                    "severity": None,
+                    "confidence": None,
+                    "cvss_v3": None,
+                    "exploitability_score": None,
+                    "evidence_snippet": item.get("description", ""),
+                    "raw_outputs": [output_file],
+                    "request_response": "",
+                    "screenshot": "",
+                    "confirmatory_tests": [],
+                    "related_domains": [],
+                    "exploit_vectors": [],
+                    "remediation_suggestions": [],
+                    "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                }
+                findings.append(finding)
+        except Exception as e:
+            print(f"Error parsing nikto output: {e}")
+        
+        return findings
+    
+    async def _test_marker_reflection(self, target_url: str, path: str, param: str, evidence_dir: Path) -> List[Dict[str, Any]]:
+        """Test marker reflection for XSS findings"""
+        try:
+            # Generate unique marker
+            marker = f"VAWESEC_TEST_{uuid.uuid4().hex[:8]}"
+            
+            # Test URL
+            test_url = f"{target_url}{path}?{param}={marker}"
+            
+            # Make request
+            response = requests.get(test_url, timeout=10)
+            
+            # Check if marker is reflected
+            is_reflected = marker in response.text
+            
+            # Save evidence
+            evidence_file = evidence_dir / f"marker_test_{param}.txt"
+            with open(evidence_file, 'w', encoding='utf-8') as f:
+                f.write(f"Test URL: {test_url}\n")
+                f.write(f"Marker: {marker}\n")
+                f.write(f"Reflected: {is_reflected}\n")
+                f.write(f"Response: {response.text[:1000]}\n")
+            
+            return [{
+                "name": "marker-reflection",
+                "result": "passed" if is_reflected else "failed",
+                "output": str(evidence_file),
+                "marker": marker,
+                "reflected": is_reflected
+            }]
+            
+        except Exception as e:
+            return [{
+                "name": "marker-reflection",
+                "result": "error",
+                "output": str(e),
+                "marker": "",
+                "reflected": False
+            }]
+    
+    def _get_rag_context_for_finding(self, finding: Dict[str, Any], rag_retriever) -> str:
+        """Get RAG context for a specific finding"""
+        try:
+            vuln_type = finding.get('type', '').lower()
+            query = f"{vuln_type} vulnerability detection remediation evidence"
+            
+            docs = rag_retriever.retrieve(query, k=5)
+            context_parts = []
+            
+            for doc in docs:
+                content = getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc)
+                context_parts.append(f"Source: {getattr(doc, 'source', 'Unknown')}")
+                context_parts.append(f"Content: {content[:300]}...")
+                context_parts.append("---")
+            
+            return "\n".join(context_parts)
+            
+        except Exception as e:
+            return f"RAG context error: {str(e)}"
+    
+    async def _enrich_finding_with_llm(self, finding: Dict[str, Any], rag_context: str, llm_client) -> Dict[str, Any]:
+        """Enrich finding with LLM analysis"""
+        try:
+            prompt = f"""
+            You are a senior web security engineer. Analyze this finding and provide enrichment.
+            
+            FINDING_JSON: {json.dumps(finding, indent=2)}
+            EVIDENCE_SNIPPET: {finding.get('evidence_snippet', '')}
+            RAG_CONTEXT: {rag_context}
+            
+            Task: Produce JSON with keys:
+            - id, short_summary, severity (Low/Med/High/Critical), confidence (Low/Med/High), 
+            - cvss_v3, exploitability_score (0-100), justification, safe_poc_steps, 
+            - remediation, references
+            
+            Rules:
+            1) Use ONLY the provided evidence and RAG context to justify severity and confidence.
+            2) Do NOT invent facts. If insufficient evidence, set confidence to Low.
+            3) Output strictly valid JSON.
+            4) Include source references from RAG context.
+            """
+            
+            llm_response = llm_client.chat(prompt)
+            
+            # Parse LLM response and merge with original finding
+            try:
+                enriched_data = json.loads(llm_response)
+                finding.update(enriched_data)
+            except:
+                # Fallback if JSON parsing fails
+                finding['llm_analysis'] = llm_response
+                finding['severity'] = 'Unknown'
+                finding['confidence'] = 'Low'
+            
+            return finding
+            
+        except Exception as e:
+            print(f"LLM enrichment error: {e}")
+            finding['severity'] = 'Unknown'
+            finding['confidence'] = 'Low'
+            finding['llm_error'] = str(e)
+            return finding
+    
+    def get_scan_status(self, job_id: str) -> Optional[ScanJob]:
+        """Get scan job status"""
+        return self.active_jobs.get(job_id)
+    
+    def get_scan_results(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get scan results"""
+        job = self.active_jobs.get(job_id)
+        if not job:
+            return None
+        
+        return {
+            "job_id": job.job_id,
+            "target_url": job.target_url,
+            "status": job.status.value,
+            "current_stage": job.current_stage.value,
+            "progress": job.progress,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "completed_at": job.completed_at,
+            "findings": job.findings or [],
+            "raw_outputs": job.raw_outputs or {},
+            "evidence_dir": job.evidence_dir
+        }
+    
+    def cancel_scan(self, job_id: str) -> bool:
+        """Cancel a scan job"""
+        job = self.active_jobs.get(job_id)
+        if job and job.status == ScanStatus.RUNNING:
+            job.status = ScanStatus.CANCELLED
+            return True
+        return False

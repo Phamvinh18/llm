@@ -57,6 +57,54 @@ class EnhancedRAGRetriever:
             return all_patterns
         return patterns.get(db_type, [])
     
+    def retrieve(self, query: str, k: int = 5) -> List[Any]:
+        """Retrieve relevant documents from RAG knowledge base"""
+        try:
+            query_lower = query.lower()
+            results = []
+            
+            # Create a simple document class for compatibility
+            class SimpleDocument:
+                def __init__(self, content: str, source: str = "", type_: str = ""):
+                    self.content = content
+                    self.source = source
+                    self.type = type_
+            
+            # Search in vulnerability knowledge
+            vuln_knowledge = self.rag_data.get("vulnerability_knowledge", {})
+            for vuln_type, vuln_info in vuln_knowledge.items():
+                if any(keyword in query_lower for keyword in [vuln_type, vuln_info.get('title', '').lower()]):
+                    content = f"{vuln_info.get('title', '')}: {vuln_info.get('description', '')}"
+                    results.append(SimpleDocument(content, 'vulnerability_knowledge', vuln_type))
+            
+            # Search in OWASP knowledge
+            owasp_data = self.rag_data.get("owasp_top_10_2023", {})
+            for owasp_id, owasp_info in owasp_data.items():
+                if any(keyword in query_lower for keyword in [owasp_info.get('title', '').lower(), 'owasp']):
+                    content = f"{owasp_info.get('title', '')}: {owasp_info.get('description', '')}"
+                    results.append(SimpleDocument(content, 'owasp_top_10_2023', owasp_id))
+            
+            # Search in security headers
+            headers_data = self.rag_data.get("security_headers", {})
+            for header_name, header_info in headers_data.items():
+                if any(keyword in query_lower for keyword in [header_name.lower(), 'header', 'security']):
+                    content = f"{header_name}: {header_info.get('description', '')}"
+                    results.append(SimpleDocument(content, 'security_headers', header_name))
+            
+            # Search in scanning techniques
+            techniques_data = self.rag_data.get("scanning_techniques", {})
+            for tech_type, tech_info in techniques_data.items():
+                if any(keyword in query_lower for keyword in [tech_type, 'scan', 'detection']):
+                    content = f"{tech_type}: {tech_info.get('description', '')}"
+                    results.append(SimpleDocument(content, 'scanning_techniques', tech_type))
+            
+            # Return top k results
+            return results[:k]
+            
+        except Exception as e:
+            print(f"RAG retrieval error: {e}")
+            return []
+    
     def get_enhanced_analysis_prompt(self, scan_results: Dict[str, Any]) -> str:
         """Generate enhanced LLM analysis prompt"""
         target_url = scan_results.get("target_url", "")

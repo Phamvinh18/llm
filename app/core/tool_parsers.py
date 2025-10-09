@@ -1,262 +1,387 @@
 """
-Tool Parsers - Parse and normalize security tool outputs into findings schema
+Tool Parsers - Parse outputs từ các security tools và extract evidence
 """
 
-import os
 import json
 import re
+import time
 from typing import Dict, List, Any, Optional
-from dataclasses import dataclass
-from bs4 import BeautifulSoup
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
-@dataclass
-class NormalizedFinding:
-    id: str
-    job_id: str
-    target: str
-    type: str
-    path: str
-    parameter: Optional[str]
-    tool: str
-    severity: str
-    confidence: str
-    cvss_v3: Optional[str]
-    evidence_snippet: str
-    raw_outputs: List[str]
-    safe_poc_steps: List[str]
-    remediation: List[str]
-    created_at: str
-
-class ToolParsers:
-    def __init__(self):
-        self.severity_mapping = {
-            'critical': 'Critical',
-            'high': 'High',
-            'medium': 'Medium',
-            'low': 'Low',
-            'info': 'Info'
-        }
+class ToolParser:
+    """Base class cho tool parsers"""
     
-    def parse_nuclei_output(self, output_file: str, job_id: str, target: str) -> List[NormalizedFinding]:
-        """Parse nuclei JSON output"""
+    def __init__(self):
+        self.tool_name = "unknown"
+    
+    def parse(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
+        """Parse tool output và return findings"""
+        raise NotImplementedError
+    
+    def extract_evidence_snippet(self, content: str, marker: str, context_lines: int = 5) -> str:
+        """Extract evidence snippet around marker"""
+        try:
+            lines = content.split('\n')
+            marker_line = -1
+            
+            # Find marker line
+            for i, line in enumerate(lines):
+                if marker in line:
+                    marker_line = i
+                    break
+            
+            if marker_line == -1:
+                return "Marker not found in response"
+            
+            # Extract context around marker
+            start = max(0, marker_line - context_lines)
+            end = min(len(lines), marker_line + context_lines + 1)
+            
+            snippet_lines = lines[start:end]
+            
+            # Highlight marker line
+            for i, line in enumerate(snippet_lines):
+                if marker in line:
+                    snippet_lines[i] = f">>> {line} <<<"
+                    break
+            
+            return '\n'.join(snippet_lines)
+            
+        except Exception as e:
+            return f"Error extracting snippet: {str(e)}"
+
+class NucleiParser(ToolParser):
+    """Parser cho Nuclei output"""
+    
+    def __init__(self):
+        super().__init__()
+        self.tool_name = "nuclei"
+    
+    def parse(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
         findings = []
         
-        if not os.path.exists(output_file):
-            return findings
-        
         try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # Handle both single object and array
-            if isinstance(data, dict):
-                data = [data]
-            
-            for item in data:
-                finding = self._parse_nuclei_finding(item, job_id, target)
+            lines = content.strip().split('\n')
+            for line_num, line in enumerate(lines, 1):
+                if line.strip():
+                    try:
+                        data = json.loads(line)
+                        finding = self._parse_nuclei_finding(data, target_url, output_file, line_num)
                 if finding:
                     findings.append(finding)
+                    except json.JSONDecodeError:
+                        continue
                     
         except Exception as e:
             print(f"Error parsing nuclei output: {e}")
         
         return findings
     
-    def _parse_nuclei_finding(self, item: Dict[str, Any], job_id: str, target: str) -> Optional[NormalizedFinding]:
+    def _parse_nuclei_finding(self, data: Dict[str, Any], target_url: str, 
+                            output_file: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse individual nuclei finding"""
         try:
-            # Extract basic info
-            template_id = item.get('template-id', 'unknown')
-            info = item.get('info', {})
-            severity = info.get('severity', 'info').lower()
-            name = info.get('name', template_id)
+            info = data.get("info", {})
+            matched_at = data.get("matched-at", "")
+            request = data.get("request", "")
+            response = data.get("response", "")
             
-            # Map severity
-            severity = self.severity_mapping.get(severity, 'Info')
+            # Extract vulnerability type
+            vuln_type = self._classify_vulnerability(info.get("name", ""), info.get("tags", []))
             
-            # Extract URL and path
-            matched_at = item.get('matched-at', '')
-            path = self._extract_path_from_url(matched_at)
+            # Extract path and parameters
+            path, param = self._extract_path_and_param(matched_at)
             
-            # Extract evidence
-            evidence = item.get('request', '') + '\n' + item.get('response', '')
-            evidence_snippet = self._extract_evidence_snippet(evidence, 5)
+            # Extract evidence snippet
+            evidence_snippet = self._extract_nuclei_evidence(request, response, info.get("name", ""))
             
-            # Generate finding ID
-            finding_id = f"f-{hash(template_id + matched_at) % 10000}"
+            finding = {
+                "id": f"f-{len(findings)+1:03d}",
+                "job_id": "temp",  # Will be updated later
+                "target": target_url,
+                "type": vuln_type,
+                "path": path,
+                "param": param,
+                "tool": "nuclei",
+                "severity": None,  # Will be enriched by LLM
+                "confidence": None,
+                "cvss_v3": None,
+                "exploitability_score": None,
+                "evidence_snippet": evidence_snippet,
+                "raw_outputs": [output_file],
+                "request_response": "",
+                "screenshot": "",
+                "confirmatory_tests": [],
+                "related_domains": self._extract_related_domains(matched_at),
+                "exploit_vectors": [],
+                "remediation_suggestions": [],
+                "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "metadata": {
+                    "template_id": info.get("template-id", ""),
+                    "template_name": info.get("name", ""),
+                    "severity_raw": info.get("severity", ""),
+                    "tags": info.get("tags", []),
+                    "reference": info.get("reference", []),
+                    "line_number": line_num
+                }
+            }
             
-            # Determine vulnerability type from template
-            vuln_type = self._map_nuclei_template_to_type(template_id, name)
-            
-            return NormalizedFinding(
-                id=finding_id,
-                job_id=job_id,
-                target=target,
-                type=vuln_type,
-                path=path,
-                parameter=None,
-                tool='nuclei',
-                severity=severity,
-                confidence='High',
-                cvss_v3=info.get('classification', {}).get('cvss-score'),
-                evidence_snippet=evidence_snippet,
-                raw_outputs=[f"nuclei: {template_id}"],
-                safe_poc_steps=self._generate_safe_poc_steps(vuln_type, matched_at),
-                remediation=self._generate_remediation(vuln_type),
-                created_at=item.get('timestamp', '')
-            )
+            return finding
             
         except Exception as e:
             print(f"Error parsing nuclei finding: {e}")
             return None
     
-    def parse_dalfox_output(self, output_file: str, job_id: str, target: str) -> List[NormalizedFinding]:
-        """Parse dalfox JSON output"""
+    def _classify_vulnerability(self, name: str, tags: List[str]) -> str:
+        """Classify vulnerability type from name and tags"""
+        name_lower = name.lower()
+        tags_lower = [tag.lower() for tag in tags]
+        
+        if any(keyword in name_lower for keyword in ['xss', 'cross-site', 'scripting']):
+            return "XSS-Reflected"
+        elif any(keyword in name_lower for keyword in ['sql', 'injection', 'sqli']):
+            return "SQL-Injection"
+        elif any(keyword in name_lower for keyword in ['lfi', 'local-file', 'file-inclusion']):
+            return "LFI"
+        elif any(keyword in name_lower for keyword in ['rfi', 'remote-file']):
+            return "RFI"
+        elif any(keyword in name_lower for keyword in ['ssrf', 'server-side']):
+            return "SSRF"
+        elif any(keyword in name_lower for keyword in ['csrf', 'cross-site-request']):
+            return "CSRF"
+        elif any(keyword in name_lower for keyword in ['idor', 'direct-object']):
+            return "IDOR"
+        elif any(keyword in name_lower for keyword in ['misconfig', 'configuration']):
+            return "Security-Misconfiguration"
+        elif any(keyword in name_lower for keyword in ['ssti', 'template-injection']):
+            return "SSTI"
+        elif any(keyword in name_lower for keyword in ['rce', 'remote-code', 'command-injection']):
+            return "RCE"
+        else:
+            return "Unknown"
+    
+    def _extract_path_and_param(self, matched_at: str) -> tuple:
+        """Extract path and parameter from matched URL"""
+        try:
+            parsed = urlparse(matched_at)
+            path = parsed.path
+            param = ""
+            
+            if parsed.query:
+                params = parse_qs(parsed.query)
+                # Get first parameter
+                if params:
+                    param = list(params.keys())[0]
+            
+            return path, param
+            
+        except Exception as e:
+            return matched_at, ""
+    
+    def _extract_nuclei_evidence(self, request: str, response: str, template_name: str) -> str:
+        """Extract evidence snippet from nuclei request/response"""
+        try:
+            # Look for common patterns in response
+            if response:
+                # Look for reflected payloads
+                if '<script>' in response.lower():
+                    return self.extract_evidence_snippet(response, '<script>')
+                elif 'alert(' in response.lower():
+                    return self.extract_evidence_snippet(response, 'alert(')
+                elif 'javascript:' in response.lower():
+                    return self.extract_evidence_snippet(response, 'javascript:')
+                else:
+                    # Return first 500 chars of response
+                    return response[:500]
+            else:
+                return f"Nuclei template: {template_name}"
+                
+        except Exception as e:
+            return f"Error extracting evidence: {str(e)}"
+    
+    def _extract_related_domains(self, matched_at: str) -> List[str]:
+        """Extract related domains from matched URL"""
+        try:
+            parsed = urlparse(matched_at)
+            domain = parsed.netloc
+            return [domain] if domain else []
+        except:
+            return []
+
+class DalfoxParser(ToolParser):
+    """Parser cho Dalfox output"""
+    
+    def __init__(self):
+        super().__init__()
+        self.tool_name = "dalfox"
+    
+    def parse(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
         findings = []
         
-        if not os.path.exists(output_file):
-            return findings
-        
         try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # Handle both single object and array
-            if isinstance(data, dict):
-                data = [data]
-            
+            # Dalfox can output both JSON and text
+            if content.strip().startswith('{'):
+                # JSON format
+                data = json.loads(content)
+                if isinstance(data, list):
             for item in data:
-                finding = self._parse_dalfox_finding(item, job_id, target)
+                        finding = self._parse_dalfox_finding(item, target_url, output_file)
+                        if finding:
+                            findings.append(finding)
+                else:
+                    finding = self._parse_dalfox_finding(data, target_url, output_file)
                 if finding:
                     findings.append(finding)
+            else:
+                # Text format - parse manually
+                findings = self._parse_dalfox_text(content, target_url, output_file)
                     
         except Exception as e:
             print(f"Error parsing dalfox output: {e}")
         
         return findings
     
-    def _parse_dalfox_finding(self, item: Dict[str, Any], job_id: str, target: str) -> Optional[NormalizedFinding]:
+    def _parse_dalfox_finding(self, data: Dict[str, Any], target_url: str, 
+                            output_file: str) -> Optional[Dict[str, Any]]:
         """Parse individual dalfox finding"""
         try:
-            # Extract basic info
-            url = item.get('url', '')
-            payload = item.get('payload', '')
-            method = item.get('method', 'GET')
+            url = data.get("url", "")
+            param = data.get("param", "")
+            payload = data.get("payload", "")
+            method = data.get("method", "GET")
             
-            # Extract path and parameter
-            path = self._extract_path_from_url(url)
-            parameter = self._extract_parameter_from_url(url)
+            # Extract path
+            parsed = urlparse(url)
+            path = parsed.path
             
-            # Extract evidence
-            evidence = item.get('evidence', '')
-            evidence_snippet = self._extract_evidence_snippet(evidence, 5)
+            # Extract evidence snippet
+            evidence_snippet = self._extract_dalfox_evidence(payload, data.get("response", ""))
             
-            # Generate finding ID
-            finding_id = f"f-{hash(url + payload) % 10000}"
+            finding = {
+                "id": f"f-{len(findings)+1:03d}",
+                "job_id": "temp",
+                "target": target_url,
+                "type": "XSS-Reflected",
+                "path": path,
+                "param": param,
+                "tool": "dalfox",
+                "severity": None,
+                "confidence": None,
+                "cvss_v3": None,
+                "exploitability_score": None,
+                "evidence_snippet": evidence_snippet,
+                "raw_outputs": [output_file],
+                "request_response": "",
+                "screenshot": "",
+                "confirmatory_tests": [],
+                "related_domains": [parsed.netloc] if parsed.netloc else [],
+                "exploit_vectors": [payload] if payload else [],
+                "remediation_suggestions": [],
+                "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "metadata": {
+                    "method": method,
+                    "payload": payload,
+                    "url": url,
+                    "param": param
+                }
+            }
             
-            return NormalizedFinding(
-                id=finding_id,
-                job_id=job_id,
-                target=target,
-                type='XSS-Reflected',
-                path=path,
-                parameter=parameter,
-                tool='dalfox',
-                severity='High',
-                confidence='High',
-                cvss_v3='6.1',
-                evidence_snippet=evidence_snippet,
-                raw_outputs=[f"dalfox: {url}"],
-                safe_poc_steps=self._generate_xss_poc_steps(url, payload),
-                remediation=self._generate_xss_remediation(),
-                created_at=item.get('timestamp', '')
-            )
+            return finding
             
         except Exception as e:
             print(f"Error parsing dalfox finding: {e}")
             return None
     
-    def parse_ffuf_output(self, output_file: str, job_id: str, target: str) -> List[NormalizedFinding]:
-        """Parse ffuf JSON output"""
+    def _parse_dalfox_text(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
+        """Parse dalfox text output"""
         findings = []
         
-        if not os.path.exists(output_file):
-            return findings
-        
         try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            results = data.get('results', [])
-            
-            for item in results:
-                finding = self._parse_ffuf_finding(item, job_id, target)
-                if finding:
+            lines = content.split('\n')
+            for line in lines:
+                if '[POC]' in line or '[VULN]' in line:
+                    # Extract URL and payload from line
+                    # Format: [POC] http://target.com/page?param=<script>alert(1)</script>
+                    match = re.search(r'\[(?:POC|VULN)\]\s+(https?://[^\s]+)', line)
+                    if match:
+                        url = match.group(1)
+                        parsed = urlparse(url)
+                        
+                        # Extract parameter and payload
+                        param = ""
+                        payload = ""
+                        if parsed.query:
+                            params = parse_qs(parsed.query)
+                            for key, values in params.items():
+                                if values and any(char in values[0] for char in ['<', '>', 'script', 'alert']):
+                                    param = key
+                                    payload = values[0]
+                                    break
+                        
+                        finding = {
+                            "id": f"f-{len(findings)+1:03d}",
+                            "job_id": "temp",
+                            "target": target_url,
+                            "type": "XSS-Reflected",
+                            "path": parsed.path,
+                            "param": param,
+                            "tool": "dalfox",
+                            "severity": None,
+                            "confidence": None,
+                            "cvss_v3": None,
+                            "exploitability_score": None,
+                            "evidence_snippet": payload,
+                            "raw_outputs": [output_file],
+                            "request_response": "",
+                            "screenshot": "",
+                            "confirmatory_tests": [],
+                            "related_domains": [parsed.netloc] if parsed.netloc else [],
+                            "exploit_vectors": [payload] if payload else [],
+                            "remediation_suggestions": [],
+                            "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                            "metadata": {
+                                "method": "GET",
+                                "payload": payload,
+                                "url": url,
+                                "param": param,
+                                "source_line": line
+                            }
+                        }
+                        
                     findings.append(finding)
                     
         except Exception as e:
-            print(f"Error parsing ffuf output: {e}")
+            print(f"Error parsing dalfox text: {e}")
         
         return findings
     
-    def _parse_ffuf_finding(self, item: Dict[str, Any], job_id: str, target: str) -> Optional[NormalizedFinding]:
-        """Parse individual ffuf finding"""
+    def _extract_dalfox_evidence(self, payload: str, response: str) -> str:
+        """Extract evidence snippet from dalfox payload and response"""
         try:
-            url = item.get('url', '')
-            status = item.get('status', 0)
-            length = item.get('length', 0)
-            
-            # Only report interesting findings
-            if status not in [200, 301, 302, 403]:
-                return None
-            
-            # Extract path
-            path = self._extract_path_from_url(url)
-            
-            # Determine severity based on path
-            severity = self._determine_path_severity(path, status)
-            
-            # Generate finding ID
-            finding_id = f"f-{hash(url) % 10000}"
-            
-            return NormalizedFinding(
-                id=finding_id,
-                job_id=job_id,
-                target=target,
-                type='Information Disclosure',
-                path=path,
-                parameter=None,
-                tool='ffuf',
-                severity=severity,
-                confidence='Medium',
-                cvss_v3='3.7' if severity == 'Medium' else '5.3',
-                evidence_snippet=f"Status: {status}, Length: {length}",
-                raw_outputs=[f"ffuf: {url}"],
-                safe_poc_steps=[f"Access {url} to verify directory/file exists"],
-                remediation=self._generate_path_remediation(path),
-                created_at=''
-            )
-            
-        except Exception as e:
-            print(f"Error parsing ffuf finding: {e}")
-            return None
+            if response and payload in response:
+                return self.extract_evidence_snippet(response, payload)
+            else:
+                return f"Payload: {payload}"
+        except:
+            return payload
+
+class NiktoParser(ToolParser):
+    """Parser cho Nikto output"""
     
-    def parse_nikto_output(self, output_file: str, job_id: str, target: str) -> List[NormalizedFinding]:
-        """Parse nikto text output"""
+    def __init__(self):
+        super().__init__()
+        self.tool_name = "nikto"
+    
+    def parse(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
         findings = []
         
-        if not os.path.exists(output_file):
-            return findings
-        
         try:
-            with open(output_file, 'r', encoding='utf-8') as f:
-                content = f.read()
+            data = json.loads(content)
+            vulnerabilities = data.get("vulnerabilities", [])
             
-            # Parse nikto output
-            lines = content.split('\n')
-            for line in lines:
-                if '+ OSVDB-' in line or '+ CVE-' in line:
-                    finding = self._parse_nikto_line(line, job_id, target)
+            for vuln in vulnerabilities:
+                finding = self._parse_nikto_finding(vuln, target_url, output_file)
                     if finding:
                         findings.append(finding)
                         
@@ -265,267 +390,173 @@ class ToolParsers:
         
         return findings
     
-    def _parse_nikto_line(self, line: str, job_id: str, target: str) -> Optional[NormalizedFinding]:
-        """Parse individual nikto line"""
+    def _parse_nikto_finding(self, vuln: Dict[str, Any], target_url: str, 
+                           output_file: str) -> Optional[Dict[str, Any]]:
+        """Parse individual nikto finding"""
         try:
-            # Extract URL from line
-            url_match = re.search(r'https?://[^\s]+', line)
-            if not url_match:
-                return None
+            url = vuln.get("url", "")
+            description = vuln.get("description", "")
+            method = vuln.get("method", "GET")
             
-            url = url_match.group()
-            path = self._extract_path_from_url(url)
+            # Extract path
+            parsed = urlparse(url)
+            path = parsed.path
             
-            # Extract vulnerability info
-            vuln_info = line.split('+')[1].strip() if '+' in line else line.strip()
+            # Classify vulnerability type
+            vuln_type = self._classify_nikto_vulnerability(description)
             
-            # Determine severity
-            severity = 'Medium'
-            if 'OSVDB-' in line or 'CVE-' in line:
-                severity = 'High'
+            finding = {
+                "id": f"f-{len(findings)+1:03d}",
+                "job_id": "temp",
+                "target": target_url,
+                "type": vuln_type,
+                "path": path,
+                "param": "",
+                "tool": "nikto",
+                "severity": None,
+                "confidence": None,
+                "cvss_v3": None,
+                "exploitability_score": None,
+                "evidence_snippet": description,
+                "raw_outputs": [output_file],
+                "request_response": "",
+                "screenshot": "",
+                "confirmatory_tests": [],
+                "related_domains": [parsed.netloc] if parsed.netloc else [],
+                "exploit_vectors": [],
+                "remediation_suggestions": [],
+                "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "metadata": {
+                    "method": method,
+                    "description": description,
+                    "url": url,
+                    "cve": vuln.get("cve", ""),
+                    "osvdb": vuln.get("osvdb", "")
+                }
+            }
             
-            # Generate finding ID
-            finding_id = f"f-{hash(line) % 10000}"
-            
-            return NormalizedFinding(
-                id=finding_id,
-                job_id=job_id,
-                target=target,
-                type='Server Vulnerability',
-                path=path,
-                parameter=None,
-                tool='nikto',
-                severity=severity,
-                confidence='High',
-                cvss_v3='6.5' if severity == 'High' else '4.3',
-                evidence_snippet=vuln_info,
-                raw_outputs=[f"nikto: {line.strip()}"],
-                safe_poc_steps=[f"Verify vulnerability at {url}"],
-                remediation=self._generate_server_remediation(),
-                created_at=''
-            )
+            return finding
             
         except Exception as e:
-            print(f"Error parsing nikto line: {e}")
+            print(f"Error parsing nikto finding: {e}")
             return None
     
-    def _extract_path_from_url(self, url: str) -> str:
-        """Extract path from URL"""
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            return parsed.path or '/'
-        except:
-            return '/'
-    
-    def _extract_parameter_from_url(self, url: str) -> Optional[str]:
-        """Extract parameter from URL"""
-        try:
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(url)
-            query_params = parse_qs(parsed.query)
-            if query_params:
-                return list(query_params.keys())[0]
-        except:
-            pass
-        return None
-    
-    def _extract_evidence_snippet(self, evidence: str, context_lines: int = 5) -> str:
-        """Extract evidence snippet with context"""
-        if not evidence:
-            return ""
+    def _classify_nikto_vulnerability(self, description: str) -> str:
+        """Classify nikto vulnerability type"""
+        desc_lower = description.lower()
         
-        lines = evidence.split('\n')
-        if len(lines) <= context_lines * 2:
-            return evidence
-        
-        # Find interesting lines (containing payloads, errors, etc.)
-        interesting_lines = []
-        for i, line in enumerate(lines):
-            if any(keyword in line.lower() for keyword in ['<script>', 'alert(', 'error', 'exception', 'vulnerable']):
-                start = max(0, i - context_lines)
-                end = min(len(lines), i + context_lines + 1)
-                interesting_lines.extend(lines[start:end])
-                break
-        
-        if interesting_lines:
-            return '\n'.join(interesting_lines)
-        
-        # Fallback to first few lines
-        return '\n'.join(lines[:context_lines * 2])
-    
-    def _map_nuclei_template_to_type(self, template_id: str, name: str) -> str:
-        """Map nuclei template to vulnerability type"""
-        template_lower = template_id.lower()
-        name_lower = name.lower()
-        
-        if 'xss' in template_lower or 'xss' in name_lower:
-            return 'XSS-Reflected'
-        elif 'sqli' in template_lower or 'sql' in template_lower:
-            return 'SQL Injection'
-        elif 'lfi' in template_lower or 'local-file' in template_lower:
-            return 'Local File Inclusion'
-        elif 'rfi' in template_lower or 'remote-file' in template_lower:
-            return 'Remote File Inclusion'
-        elif 'ssrf' in template_lower:
-            return 'Server-Side Request Forgery'
-        elif 'csrf' in template_lower:
-            return 'Cross-Site Request Forgery'
-        elif 'rce' in template_lower or 'command' in template_lower:
-            return 'Remote Code Execution'
-        elif 'info' in template_lower or 'disclosure' in template_lower:
-            return 'Information Disclosure'
+        if any(keyword in desc_lower for keyword in ['xss', 'cross-site', 'scripting']):
+            return "XSS-Reflected"
+        elif any(keyword in desc_lower for keyword in ['sql', 'injection']):
+            return "SQL-Injection"
+        elif any(keyword in desc_lower for keyword in ['directory', 'listing', 'browsing']):
+            return "Directory-Listing"
+        elif any(keyword in desc_lower for keyword in ['server', 'version', 'disclosure']):
+            return "Information-Disclosure"
+        elif any(keyword in desc_lower for keyword in ['ssl', 'tls', 'certificate']):
+            return "SSL-TLS-Issue"
+        elif any(keyword in desc_lower for keyword in ['backup', 'old', 'temp']):
+            return "Sensitive-File-Exposure"
         else:
-            return 'Vulnerability'
+            return "Security-Misconfiguration"
+
+class FFUFParser(ToolParser):
+    """Parser cho FFUF output"""
     
-    def _determine_path_severity(self, path: str, status: int) -> str:
-        """Determine severity based on discovered path"""
-        path_lower = path.lower()
+    def __init__(self):
+        super().__init__()
+        self.tool_name = "ffuf"
+    
+    def parse(self, content: str, target_url: str, output_file: str) -> List[Dict[str, Any]]:
+        findings = []
         
-        # High severity paths
-        if any(keyword in path_lower for keyword in ['admin', 'config', 'backup', '.git', '.env', 'database']):
-            return 'High'
-        
-        # Medium severity paths
-        if any(keyword in path_lower for keyword in ['test', 'dev', 'staging', 'debug', 'phpinfo']):
-            return 'Medium'
-        
-        # Low severity for other paths
-        return 'Low'
-    
-    def _generate_safe_poc_steps(self, vuln_type: str, url: str) -> List[str]:
-        """Generate safe PoC steps"""
-        steps = {
-            'XSS-Reflected': [
-                f"1. Navigate to {url}",
-                "2. Inject payload in parameter",
-                "3. Observe reflected output",
-                "4. Verify payload execution"
-            ],
-            'SQL Injection': [
-                f"1. Navigate to {url}",
-                "2. Inject SQL payload in parameter",
-                "3. Observe error messages or behavior changes",
-                "4. Verify database interaction"
-            ],
-            'Information Disclosure': [
-                f"1. Access {url}",
-                "2. Verify information is exposed",
-                "3. Document sensitive data found",
-                "4. Assess impact of disclosure"
-            ]
-        }
-        
-        return steps.get(vuln_type, [
-            f"1. Access {url}",
-            "2. Verify vulnerability",
-            "3. Document findings",
-            "4. Assess impact"
-        ])
-    
-    def _generate_xss_poc_steps(self, url: str, payload: str) -> List[str]:
-        """Generate XSS PoC steps"""
-        return [
-            f"1. Navigate to {url}",
-            f"2. Inject payload: {payload}",
-            "3. Observe reflected output",
-            "4. Verify script execution in browser",
-            "5. Document XSS context and impact"
-        ]
-    
-    def _generate_remediation(self, vuln_type: str) -> List[str]:
-        """Generate remediation steps"""
-        remediation = {
-            'XSS-Reflected': [
-                "Implement proper input validation",
-                "Use output encoding (HTML entity encoding)",
-                "Implement Content Security Policy (CSP)",
-                "Use parameterized queries"
-            ],
-            'SQL Injection': [
-                "Use prepared statements",
-                "Implement input validation",
-                "Use parameterized queries",
-                "Apply principle of least privilege"
-            ],
-            'Information Disclosure': [
-                "Remove sensitive information from responses",
-                "Implement proper error handling",
-                "Use generic error messages",
-                "Review and sanitize all output"
-            ]
-        }
-        
-        return remediation.get(vuln_type, [
-            "Review and fix the vulnerability",
-            "Implement proper security controls",
-            "Test the fix thoroughly",
-            "Monitor for similar issues"
-        ])
-    
-    def _generate_xss_remediation(self) -> List[str]:
-        """Generate XSS remediation"""
-        return [
-            "Implement proper input validation and sanitization",
-            "Use output encoding (HTML entity encoding)",
-            "Implement Content Security Policy (CSP)",
-            "Use parameterized queries for database operations",
-            "Regular security testing and code review"
-        ]
-    
-    def _generate_path_remediation(self, path: str) -> List[str]:
-        """Generate path remediation"""
-        return [
-            "Remove or secure sensitive directories",
-            "Implement proper access controls",
-            "Use authentication for sensitive areas",
-            "Regular security audits of file structure"
-        ]
-    
-    def _generate_server_remediation(self) -> List[str]:
-        """Generate server vulnerability remediation"""
-        return [
-            "Update server software to latest version",
-            "Apply security patches",
-            "Implement proper server configuration",
-            "Regular security monitoring and updates"
-        ]
-    
-    def normalize_all_findings(self, tool_outputs: Dict[str, Any], job_id: str, target: str) -> List[NormalizedFinding]:
-        """Normalize all tool outputs into findings"""
-        all_findings = []
-        
-        # Parse each tool output
-        for tool_name, output in tool_outputs.items():
-            if not output.success or not output.output_file:
-                continue
+        try:
+            data = json.loads(content)
+            results = data.get("results", [])
             
-            try:
-                if tool_name == 'nuclei':
-                    findings = self.parse_nuclei_output(output.output_file, job_id, target)
-                elif tool_name == 'dalfox':
-                    findings = self.parse_dalfox_output(output.output_file, job_id, target)
-                elif tool_name == 'ffuf':
-                    findings = self.parse_ffuf_output(output.output_file, job_id, target)
-                elif tool_name == 'nikto':
-                    findings = self.parse_nikto_output(output.output_file, job_id, target)
-                else:
-                    continue
+            for result in results:
+                finding = self._parse_ffuf_result(result, target_url, output_file)
+                if finding:
+                    findings.append(finding)
+                    
+        except Exception as e:
+            print(f"Error parsing ffuf output: {e}")
+        
+        return findings
+    
+    def _parse_ffuf_result(self, result: Dict[str, Any], target_url: str, 
+                          output_file: str) -> Optional[Dict[str, Any]]:
+        """Parse individual ffuf result"""
+        try:
+            url = result.get("url", "")
+            status = result.get("status", 0)
+            length = result.get("length", 0)
+            words = result.get("words", 0)
+            
+            # Extract path
+            parsed = urlparse(url)
+            path = parsed.path
+            
+            # Only report interesting findings
+            if status in [200, 301, 302, 403] and length > 0:
+                finding = {
+                    "id": f"f-{len(findings)+1:03d}",
+                    "job_id": "temp",
+                    "target": target_url,
+                    "type": "Directory-Found",
+                    "path": path,
+                    "param": "",
+                    "tool": "ffuf",
+                    "severity": None,
+                    "confidence": None,
+                    "cvss_v3": None,
+                    "exploitability_score": None,
+                    "evidence_snippet": f"Status: {status}, Length: {length}, Words: {words}",
+                    "raw_outputs": [output_file],
+                    "request_response": "",
+                    "screenshot": "",
+                    "confirmatory_tests": [],
+                    "related_domains": [parsed.netloc] if parsed.netloc else [],
+                    "exploit_vectors": [],
+                    "remediation_suggestions": [],
+                    "created_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    "metadata": {
+                        "status": status,
+                        "length": length,
+                        "words": words,
+                        "url": url
+                    }
+                }
                 
-                all_findings.extend(findings)
+                return finding
                 
             except Exception as e:
-                print(f"Error parsing {tool_name} output: {e}")
+            print(f"Error parsing ffuf result: {e}")
         
-        # Remove duplicates based on path and type
-        unique_findings = []
-        seen = set()
-        
-        for finding in all_findings:
-            key = (finding.path, finding.type, finding.parameter)
-            if key not in seen:
-                seen.add(key)
-                unique_findings.append(finding)
-        
-        return unique_findings
+        return None
 
+class ToolParserFactory:
+    """Factory để tạo appropriate parser cho từng tool"""
+    
+    _parsers = {
+        "nuclei": NucleiParser,
+        "dalfox": DalfoxParser,
+        "nikto": NiktoParser,
+        "ffuf": FFUFParser
+    }
+    
+    @classmethod
+    def get_parser(cls, tool_name: str) -> ToolParser:
+        """Get parser for specific tool"""
+        parser_class = cls._parsers.get(tool_name.lower())
+        if parser_class:
+            return parser_class()
+        else:
+            return ToolParser()  # Default parser
+    
+    @classmethod
+    def parse_tool_output(cls, tool_name: str, content: str, target_url: str, 
+                         output_file: str) -> List[Dict[str, Any]]:
+        """Parse tool output using appropriate parser"""
+        parser = cls.get_parser(tool_name)
+        return parser.parse(content, target_url, output_file)

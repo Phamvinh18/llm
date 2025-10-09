@@ -96,3 +96,10 @@ try:
     router.include_router(professional_scan_router, prefix='/professional-scan')
 except Exception:
     pass
+
+# Enhanced Scan Endpoints
+try:
+    from app.api.scan_endpoints import router as scan_endpoints_router
+    router.include_router(scan_endpoints_router, prefix='/scan')
+except Exception:
+    pass

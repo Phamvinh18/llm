@@ -22,6 +22,8 @@ class ChatCommand(Enum):
     SCAN_RESULTS = "/scan-results"
     SCAN_CANCEL = "/scan-cancel"
     HELP = "/help"
+    REPORT = "/report"
+    RECOMMEND = "/recommend"
     GREETING = "/"
     UNKNOWN = "unknown"
 
@@ -49,7 +51,12 @@ class ChatAssistantRAG:
     
     def __init__(self):
         self.llm_client = GeminiClient()
-        self.kb_retriever = AdvancedKBRetriever()
+        try:
+            from app.core.enhanced_rag_retriever import EnhancedRAGRetriever
+            self.kb_retriever = EnhancedRAGRetriever()
+        except Exception as e:
+            print(f"RAG retriever init error: {e}")
+            self.kb_retriever = None
         self.vulnerability_rag = self._load_vulnerability_rag()
         self.conversation_history = []
     
@@ -100,6 +107,10 @@ class ChatAssistantRAG:
                 return await self._handle_scan_command(message)
             elif command == ChatCommand.HELP:
                 return await self._handle_help_command()
+            elif command == ChatCommand.REPORT:
+                return await self._handle_report_command(message)
+            elif command == ChatCommand.RECOMMEND:
+                return await self._handle_recommend_command(message)
             elif command == ChatCommand.GREETING:
                 return await self._handle_greeting_command()
             else:
@@ -128,18 +139,23 @@ class ChatAssistantRAG:
             return ChatCommand.SCAN
         elif message_lower.startswith('/help'):
             return ChatCommand.HELP
+        elif message_lower.startswith('/report'):
+            return ChatCommand.REPORT
+        elif message_lower.startswith('/recommend'):
+            return ChatCommand.RECOMMEND
         elif message_lower.startswith('/') or message_lower in ['hi', 'hello', 'chào', 'xin chào']:
             return ChatCommand.GREETING
         else:
             return ChatCommand.UNKNOWN
     
     async def _handle_payload_command(self, message: str) -> ChatResponse:
-        """Xử lý lệnh /payload"""
+        """Xử lý lệnh /payload với enhanced features"""
         try:
             # Parse message để lấy vulnerability type và URL
             parts = message.split()
             vulnerability_type = None
             target_url = None
+            parameter = None
             
             # Extract vulnerability type
             for part in parts:
@@ -160,33 +176,61 @@ class ChatAssistantRAG:
             if url_match:
                 target_url = url_match.group()
             
-            # Generate payloads
-            payloads = await self._generate_payloads(vulnerability_type, target_url)
+            # Extract parameter (if specified)
+            param_pattern = r'param[=:]\s*(\w+)'
+            param_match = re.search(param_pattern, message, re.IGNORECASE)
+            if param_match:
+                parameter = param_match.group(1)
             
-            # Create response message
-            response_message = "[EXPLOSION] **Payload Generator**\n\n"
+            # Generate enhanced payloads
+            payloads = await self._generate_enhanced_payloads(vulnerability_type, target_url, parameter)
+            
+            # Generate test URLs
+            test_urls = self._generate_test_urls(target_url, payloads, parameter)
+            
+            # Get RAG context for better suggestions
+            rag_context = self._get_payload_rag_context(vulnerability_type.value if vulnerability_type else "general")
+            
+            # Create enhanced response message
+            response_message = "[EXPLOSION] **Enhanced Payload Generator**\n\n"
             
             if vulnerability_type:
-                response_message += f"[SCAN] **Loại lỗ hổng:** {vulnerability_type.value}\n"
+                response_message += f"[SCAN] **Loại lỗ hổng:** {vulnerability_type.value.upper()}\n"
             else:
-                response_message += "[SCAN] **Loại lỗ hổng:** Chưa xác định\n"
+                response_message += "[SCAN] **Loại lỗ hổng:** Chưa xác định (sẽ tạo payloads tổng quát)\n"
             
             if target_url:
                 response_message += f"[LOCATION] **Target URL:** {target_url}\n"
             else:
                 response_message += "[LOCATION] **Target URL:** Chưa cung cấp\n"
             
-            response_message += "\n**Payloads được tạo:**\n"
-            for i, payload in enumerate(payloads[:5], 1):
+            if parameter:
+                response_message += f"[WRENCH] **Parameter:** {parameter}\n"
+            
+            response_message += f"\n[PAYLOAD] **Generated {len(payloads)} payloads:**\n"
+            for i, payload in enumerate(payloads[:8], 1):
                 response_message += f"{i}. `{payload}`\n"
             
-            if len(payloads) > 5:
-                response_message += f"... và {len(payloads) - 5} payloads khác\n"
+            if len(payloads) > 8:
+                response_message += f"... và {len(payloads) - 8} payloads khác\n"
             
-            response_message += "\n[IDEA] **Gợi ý:**\n"
+            # Add test URLs if available
+            if test_urls:
+                response_message += f"\n[TEST] **Test URLs (top 3):**\n"
+                for i, test_url in enumerate(test_urls[:3], 1):
+                    response_message += f"{i}. `{test_url}`\n"
+            
+            # Enhanced suggestions
+            response_message += "\n[IDEA] **Enhanced Suggestions:**\n"
             response_message += "• Test payloads trên target URL\n"
             response_message += "• Sử dụng Burp Suite hoặc OWASP ZAP\n"
             response_message += "• Kiểm tra response để xác nhận lỗ hổng\n"
+            response_message += "• Sử dụng /scan để scan tự động\n"
+            
+            # Add RAG-based recommendations
+            if rag_context:
+                response_message += f"\n[BOOK] **Knowledge Base Insights:**\n"
+                response_message += f"• {rag_context[:200]}...\n"
             
             return ChatResponse(
                 message=response_message,
@@ -196,7 +240,8 @@ class ChatAssistantRAG:
                 payloads=payloads,
                 suggestions=[
                     f"Test payloads trên {target_url}" if target_url else "Cung cấp target URL",
-                    "Sử dụng /scan để scan lỗ hổng",
+                    f"Test parameter: {parameter}" if parameter else "Specify parameter với param=name",
+                    "Sử dụng /scan để scan lỗ hổng tự động",
                     "Xem thêm payloads với /payload xss",
                     "Hướng dẫn sử dụng /help"
                 ]
@@ -210,7 +255,7 @@ class ChatAssistantRAG:
             )
     
     async def _handle_scan_command(self, message: str) -> ChatResponse:
-        """Xử lý lệnh /scan với Scan Orchestrator"""
+        """Xử lý lệnh /scan - Thực sự chạy scan và trả về kết quả"""
         try:
             # Extract URL from message
             url_pattern = r'https?://[^\s]+'
@@ -229,47 +274,62 @@ class ChatAssistantRAG:
             
             target_url = url_match.group()
             
-            # Perform immediate enhanced scan với timeout
-            try:
-                scan_results = await asyncio.wait_for(
-                    self._perform_enhanced_scan(target_url), 
-                    timeout=120.0  # 2 phút timeout
-                )
-            except asyncio.TimeoutError:
-                return ChatResponse(
-                    message="[ERROR] **Scan timeout:** Quá trình scan mất quá nhiều thời gian (>2 phút). Vui lòng thử lại với target khác hoặc kiểm tra kết nối mạng.",
-                    command=ChatCommand.SCAN,
-                    suggestions=[
-                        "Thử với target khác",
-                        "Kiểm tra kết nối mạng",
-                        "Sử dụng /help để xem hướng dẫn"
-                    ]
-                )
-            except Exception as e:
-                return ChatResponse(
-                    message=f"[ERROR] **Lỗi scan:** {str(e)}",
-                    command=ChatCommand.SCAN,
-                    suggestions=[
-                        "Kiểm tra URL có hợp lệ không",
-                        "Thử với target khác",
-                        "Sử dụng /help để xem hướng dẫn"
-                    ]
-                )
+            # Thực sự chạy scan với các tool thực tế
+            print(f"[SCAN] Starting real scan for {target_url}")
             
-            # Analyze with LLM (không cần await vì là sync function)
-            try:
-                llm_analysis = self._analyze_enhanced_scan_results(scan_results, target_url)
-            except Exception as e:
-                print(f"LLM analysis error: {e}")
-                llm_analysis = f"LLM analysis error: {str(e)} - using basic analysis"
+            # Import real tools integration
+            from app.core.real_tools_integration import RealToolsIntegration
             
-            # Create comprehensive and user-friendly response message
-            response_message = "[SCAN] **Kết Quả Scan Chi Tiết**\n\n"
-            response_message += f"[TARGET] **Target:** {target_url}\n"
-            response_message += f"[TIME] **Thời gian scan:** {scan_results.get('scan_time', 'N/A')}\n"
-            response_message += f"[SCAN] **Loại scan:** Enhanced Security Analysis\n\n"
+            # Run all security tools
+            tools_results = await RealToolsIntegration.run_all_tools(target_url)
             
-            # HTTP Response Analysis - Enhanced
+            # Perform basic HTTP analysis
+            http_analysis = await self._perform_http_analysis(target_url)
+            
+            # Get RAG context for analysis
+            rag_context = self._get_scan_rag_context(target_url)
+            
+            # Combine results
+            scan_results = {
+                'target_url': target_url,
+                'scan_time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'tools_scan_time': tools_results.get('scan_time', 0),
+                'http_analysis': http_analysis,
+                'nikto_results': tools_results.get('nikto_results', []),
+                'nuclei_results': tools_results.get('nuclei_results', []),
+                'ffuf_results': tools_results.get('ffuf_results', []),
+                'httpx_results': tools_results.get('httpx_results', {}),
+                'rag_context': rag_context
+            }
+            
+            # Analyze with LLM + RAG
+            llm_analysis = self._analyze_scan_results_with_llm_rag(scan_results)
+            
+            # Format response
+            response_message = self._format_scan_response(scan_results, llm_analysis)
+            
+            return ChatResponse(
+                message=response_message,
+                command=ChatCommand.SCAN,
+                suggestions=[
+                    f"/payload xss {target_url}",
+                    f"/payload sql {target_url}",
+                    "/help"
+                ]
+            )
+            
+        except Exception as e:
+            return ChatResponse(
+                message=f"[ERROR] **Lỗi scan:** {str(e)}",
+                command=ChatCommand.SCAN,
+                suggestions=[
+                    "Kiểm tra URL có hợp lệ không",
+                    "Thử với target khác",
+                    "Sử dụng /help để xem hướng dẫn"
+                ]
+            )
+    
+    async def _handle_help_command(self) -> ChatResponse:
             if scan_results.get('http_response'):
                 http_resp = scan_results['http_response']
                 response_message += "## [CHART] **Phân Tích HTTP Response**\n"
@@ -720,14 +780,46 @@ class ChatAssistantRAG:
             
             scan_results['discovered_paths'] = discovered_paths
             
-            # 5. Vulnerability Scanning
+            # 5. Real Tool Vulnerability Scanning
             vulnerabilities = []
             
-            # XSS Detection
+            # Import real tools integration
+            from app.core.real_tools_integration import RealToolsIntegration
+            
+            # Run real security tools
+            print(f"[TOOL] Running real security tools on {target_url}")
+            
+            # Run all tools in parallel
+            tools_results = await RealToolsIntegration.run_all_tools(target_url)
+            
+            # Add Nikto results
+            if tools_results.get('nikto_results'):
+                vulnerabilities.extend(tools_results['nikto_results'])
+                print(f"[NIKTO] Found {len(tools_results['nikto_results'])} vulnerabilities")
+            
+            # Add Nuclei results
+            if tools_results.get('nuclei_results'):
+                vulnerabilities.extend(tools_results['nuclei_results'])
+                print(f"[NUCLEI] Found {len(tools_results['nuclei_results'])} vulnerabilities")
+            
+            # Add FFUF results to discovered paths
+            if tools_results.get('ffuf_results'):
+                scan_results['discovered_paths'].extend(tools_results['ffuf_results'])
+                print(f"[FFUF] Found {len(tools_results['ffuf_results'])} paths")
+            
+            # Add HTTPX results to technology detection
+            if tools_results.get('httpx_results'):
+                httpx_data = tools_results['httpx_results']
+                if httpx_data.get('technologies'):
+                    scan_results['technology']['httpx_tech'] = httpx_data['technologies']
+                if httpx_data.get('title'):
+                    scan_results['technology']['httpx_title'] = httpx_data['title']
+            
+            # XSS Detection with real payloads
             xss_findings = await self._scan_xss_vulnerabilities(target_url)
             vulnerabilities.extend(xss_findings)
             
-            # SQL Injection Detection
+            # SQL Injection Detection with real payloads
             sql_findings = await self._scan_sql_injection_vulnerabilities(target_url)
             vulnerabilities.extend(sql_findings)
             
@@ -736,6 +828,7 @@ class ChatAssistantRAG:
             vulnerabilities.extend(misconfig_findings)
             
             scan_results['vulnerabilities'] = vulnerabilities
+            scan_results['tools_scan_time'] = tools_results.get('scan_time', 0)
             
             return scan_results
             
@@ -1228,89 +1321,125 @@ class ChatAssistantRAG:
                 'links_count': len(scan_results.get('links', []))
             }
             
+            # Prepare detailed vulnerability information
+            vulnerabilities = scan_results.get('vulnerabilities', [])
+            nikto_vulns = [v for v in vulnerabilities if v.get('tool') == 'nikto']
+            nuclei_vulns = [v for v in vulnerabilities if v.get('tool') == 'nuclei']
+            xss_vulns = [v for v in vulnerabilities if 'xss' in v.get('type', '').lower()]
+            sql_vulns = [v for v in vulnerabilities if 'sql' in v.get('type', '').lower()]
+            
+            # Prepare discovered paths information
+            discovered_paths = scan_results.get('discovered_paths', [])
+            ffuf_paths = [p for p in discovered_paths if p.get('tool') == 'ffuf']
+            
             prompt = f"""
-            Bạn là chuyên gia bảo mật web với kiến thức sâu rộng. Hãy phân tích kết quả scan này:
+            Bạn là chuyên gia bảo mật web với kiến thức sâu rộng. Hãy phân tích kết quả scan này từ các tool thực tế:
             
             Target URL: {target_url}
             Scan Time: {scan_results.get('scan_time', 'N/A')}
+            Tools Scan Time: {scan_results.get('tools_scan_time', 0):.2f}s
             
-            Scan Data:
-            {json.dumps(scan_data, indent=2, ensure_ascii=False)}
+            ## [TOOL] **KẾT QUẢ TỪ CÁC TOOL THỰC TẾ**
             
-            HTTP Response:
+            ### Nikto Scan Results: {len(nikto_vulns)} findings
+            {json.dumps(nikto_vulns[:5], indent=2, ensure_ascii=False) if nikto_vulns else 'No Nikto findings'}
+            
+            ### Nuclei Scan Results: {len(nuclei_vulns)} findings  
+            {json.dumps(nuclei_vulns[:5], indent=2, ensure_ascii=False) if nuclei_vulns else 'No Nuclei findings'}
+            
+            ### FFUF Directory Discovery: {len(ffuf_paths)} paths
+            {json.dumps(ffuf_paths[:10], indent=2, ensure_ascii=False) if ffuf_paths else 'No FFUF findings'}
+            
+            ### XSS Vulnerabilities: {len(xss_vulns)} findings
+            {json.dumps(xss_vulns[:3], indent=2, ensure_ascii=False) if xss_vulns else 'No XSS findings'}
+            
+            ### SQL Injection Vulnerabilities: {len(sql_vulns)} findings
+            {json.dumps(sql_vulns[:3], indent=2, ensure_ascii=False) if sql_vulns else 'No SQL injection findings'}
+            
+            ## [HTTP] **HTTP RESPONSE ANALYSIS**
             - Status Code: {scan_results.get('http_response', {}).get('status_code', 'N/A')}
             - Server: {scan_results.get('http_response', {}).get('server', 'N/A')}
             - Content Type: {scan_results.get('http_response', {}).get('content_type', 'N/A')}
             - Security Score: {scan_results.get('http_response', {}).get('security_headers', {}).get('security_score', 0):.1f}%
+            - Response Time: {scan_results.get('http_response', {}).get('response_time', 'N/A')}
             
-            Technology Stack:
+            ## [TECH] **TECHNOLOGY STACK**
             - Web Server: {scan_results.get('technology', {}).get('server', 'Unknown')}
             - CMS: {scan_results.get('technology', {}).get('cms', 'None')}
             - Frameworks: {', '.join(scan_results.get('technology', {}).get('frameworks', []))}
             - Languages: {', '.join(scan_results.get('technology', {}).get('languages', []))}
+            - HTTPX Tech: {', '.join(scan_results.get('technology', {}).get('httpx_tech', []))}
             
-            Discovered Paths: {len(scan_results.get('discovered_paths', []))}
-            Vulnerabilities Found: {len(scan_results.get('vulnerabilities', []))}
-            Forms Found: {len(scan_results.get('forms', []))}
-            Links Found: {len(scan_results.get('links', []))}
+            ## [STATS] **SCAN STATISTICS**
+            - Total Vulnerabilities: {len(vulnerabilities)}
+            - Discovered Paths: {len(discovered_paths)}
+            - Forms Found: {len(scan_results.get('forms', []))}
+            - Links Found: {len(scan_results.get('links', []))}
             
-            Thông tin tham khảo từ RAG:
+            ## [RAG] **RAG KNOWLEDGE BASE CONTEXT**
             {rag_context}
             
-            Hãy phân tích chi tiết theo format sau:
+            Hãy phân tích chi tiết theo format sau với thông tin từ các tool thực tế:
             
             ## [SCAN] **TỔNG QUAN BẢO MẬT**
-            - Đánh giá tổng thể về bảo mật của website
-            - Mức độ rủi ro chung dựa trên kết quả scan
+            - Đánh giá tổng thể về bảo mật của website dựa trên kết quả từ Nikto, Nuclei, FFUF
+            - Mức độ rủi ro chung và điểm số bảo mật
+            - Thời gian scan và hiệu quả của các tool
             
             ## [ALERT] **LỖ HỔNG BẢO MẬT PHÁT HIỆN**
-            ### XSS (Cross-Site Scripting)
+            ### Nikto Findings ({len(nikto_vulns)} findings)
+            - Phân tích chi tiết từng lỗ hổng Nikto phát hiện
+            - Mức độ nghiêm trọng và khả năng khai thác
+            - CVE/OSVDB references nếu có
+            
+            ### Nuclei Findings ({len(nuclei_vulns)} findings)
+            - Phân tích các template Nuclei đã match
+            - Severity levels và classification
+            - Request/Response evidence
+            
+            ### XSS Vulnerabilities ({len(xss_vulns)} findings)
             - Phân tích khả năng XSS dựa trên forms và parameters
+            - Payloads đã test và kết quả
             - Đánh giá input validation và output encoding
             
-            ### SQL Injection
+            ### SQL Injection ({len(sql_vulns)} findings)
             - Phân tích khả năng SQL injection
-            - Kiểm tra error messages và database exposure
-            
-            ### Security Misconfiguration
-            - Missing security headers
-            - Server information disclosure
-            - Debug information exposure
-            - Directory listing issues
+            - Error messages và database exposure
+            - Payloads đã test và response patterns
             
             ## [CHART] **PHÂN TÍCH CHI TIẾT**
             ### Headers Analysis
-            - Security headers có/thiếu
-            - Server information disclosure
+            - Security headers có/thiếu và tác động
+            - Server information disclosure risks
             - Content-Type và encoding issues
             
             ### Technology Stack Analysis
             - Đánh giá bảo mật của technology stack
             - Known vulnerabilities của CMS/frameworks
-            - Version disclosure risks
+            - Version disclosure risks từ HTTPX
             
             ### Path Discovery Analysis
-            - Các endpoint có thể khai thác
+            - Các endpoint có thể khai thác từ FFUF
             - Admin panels và sensitive paths
             - Backup files và configuration files
             
             ## [WARNING] **MỨC ĐỘ NGHIÊM TRỌNG**
             - Critical: Lỗ hổng có thể dẫn đến compromise hoàn toàn
-            - High: Lỗ hổng có thể dẫn đến data breach
+            - High: Lỗ hổng có thể dẫn đến data breach  
             - Medium: Lỗ hổng có thể dẫn đến information disclosure
             - Low: Lỗ hổng có thể dẫn đến reconnaissance
             
             ## [WRENCH] **KHUYẾN NGHỊ KHẮC PHỤC**
-            - Specific steps để fix từng lỗ hổng
-            - Best practices cho security
+            - Specific steps để fix từng lỗ hổng dựa trên tool findings
+            - Best practices cho security dựa trên RAG knowledge
             - Immediate actions cần thực hiện
             
-            ## [BOOK] **URLS THAM KHẢO**
-            - Test sites để verify
-            - Documentation và tools
-            - Security resources
+            ## [BOOK] **URLS THAM KHẢO & TEST**
+            - Test URLs để verify findings
+            - Documentation và tools references
+            - Security resources từ RAG knowledge base
             
-            Sử dụng thông tin từ RAG để đưa ra phân tích chính xác và tránh ảo giác.
+            Sử dụng thông tin từ RAG và kết quả tool thực tế để đưa ra phân tích chính xác và tránh ảo giác.
             """
             
             # LLM analysis - ensure it's synchronous
@@ -1340,25 +1469,25 @@ class ChatAssistantRAG:
             xss_docs = self.rag_retriever.retrieve("XSS cross-site scripting vulnerability detection prevention", k=3)
             if xss_docs:
                 rag_context += "\nXSS Knowledge:\n"
-                rag_context += "\n".join([doc.content[:200] + "..." for doc in xss_docs])
+                rag_context += "\n".join([(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200] + "..." for doc in xss_docs])
             
             # Get SQL injection knowledge
             sql_docs = self.rag_retriever.retrieve("SQL injection vulnerability detection prevention", k=3)
             if sql_docs:
                 rag_context += "\nSQL Injection Knowledge:\n"
-                rag_context += "\n".join([doc.content[:200] + "..." for doc in sql_docs])
+                rag_context += "\n".join([(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200] + "..." for doc in sql_docs])
             
             # Get security misconfiguration knowledge
             misconfig_docs = self.rag_retriever.retrieve("security misconfiguration vulnerability detection prevention", k=3)
             if misconfig_docs:
                 rag_context += "\nSecurity Misconfiguration Knowledge:\n"
-                rag_context += "\n".join([doc.content[:200] + "..." for doc in misconfig_docs])
+                rag_context += "\n".join([(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200] + "..." for doc in misconfig_docs])
             
             # Get security headers knowledge
             headers_docs = self.rag_retriever.retrieve("security headers HTTP headers protection", k=2)
             if headers_docs:
                 rag_context += "\nSecurity Headers Knowledge:\n"
-                rag_context += "\n".join([doc.content[:200] + "..." for doc in headers_docs])
+                rag_context += "\n".join([(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200] + "..." for doc in headers_docs])
             
             return rag_context if rag_context else "No RAG context available"
             
@@ -2146,8 +2275,8 @@ class ChatAssistantRAG:
 
 Hãy thử /help để xem hướng dẫn chi tiết!"""
     
-    async def _generate_payloads(self, vulnerability_type: Optional[VulnerabilityType], target_url: Optional[str]) -> List[str]:
-        """Generate payloads dựa trên vulnerability type"""
+    async def _generate_enhanced_payloads(self, vulnerability_type: Optional[VulnerabilityType], target_url: Optional[str], parameter: Optional[str] = None) -> List[str]:
+        """Generate enhanced payloads dựa trên vulnerability type, target URL và parameter"""
         try:
             if not vulnerability_type:
                 # Generate general payloads
@@ -2156,7 +2285,12 @@ Hãy thử /help để xem hướng dẫn chi tiết!"""
                     "' OR 1=1--",
                     "../../../etc/passwd",
                     "/admin/",
-                    "admin:admin"
+                    "admin:admin",
+                    "<img src=x onerror=alert('XSS')>",
+                    "'; DROP TABLE users; --",
+                    "?id=1",
+                    "?id=2",
+                    "?id=3"
                 ]
             
             # Get payloads from RAG data
@@ -2168,26 +2302,96 @@ Hãy thử /help để xem hướng dẫn chi tiết!"""
                 xss_types = vuln_data.get('types', {})
                 for xss_type, xss_data in xss_types.items():
                     payloads.extend(xss_data.get('payloads', []))
+                # Add advanced XSS payloads
+                payloads.extend([
+                    "<script>fetch('/admin/users').then(r=>r.text()).then(d=>alert(d))</script>",
+                    "<iframe src='javascript:alert(document.cookie)'></iframe>",
+                    "<object data='javascript:alert(1)'></object>",
+                    "<ScRiPt>alert('XSS')</ScRiPt>",
+                    "<script>alert(String.fromCharCode(88,83,83))</script>"
+                ])
             elif vulnerability_type == VulnerabilityType.SQL_INJECTION:
                 sql_types = vuln_data.get('types', {})
                 for sql_type, sql_data in sql_types.items():
                     payloads.extend(sql_data.get('payloads', []))
+                # Add advanced SQL injection payloads
+                payloads.extend([
+                    "' OR 1=1 LIMIT 1 OFFSET 0--",
+                    "' UNION SELECT username,password FROM users--",
+                    "'; INSERT INTO users VALUES('hacker','password');--",
+                    "' AND (SELECT COUNT(*) FROM users) > 0--",
+                    "'; WAITFOR DELAY '00:00:05'--"
+                ])
             elif vulnerability_type == VulnerabilityType.MISCONFIGURATION:
                 misconfig_types = vuln_data.get('types', {})
                 for misconfig_type, misconfig_data in misconfig_types.items():
                     payloads.extend(misconfig_data.get('payloads', []))
+                # Add misconfiguration payloads
+                payloads.extend([
+                    "/.env",
+                    "/config.php",
+                    "/wp-config.php",
+                    "/.git/config",
+                    "/backup.sql"
+                ])
             elif vulnerability_type == VulnerabilityType.IDOR:
                 idor_types = vuln_data.get('types', {})
                 for idor_type, idor_data in idor_types.items():
                     payloads.extend(idor_data.get('payloads', []))
+                # Add IDOR payloads
+                payloads.extend([
+                    "?id=1", "?id=2", "?id=3",
+                    "?user_id=1", "?user_id=2", "?user_id=3",
+                    "?account_id=1", "?account_id=2", "?account_id=3",
+                    "?order_id=1", "?order_id=2", "?order_id=3"
+                ])
             
             # Remove duplicates and limit
             unique_payloads = list(set(payloads))
-            return unique_payloads[:15]  # Limit to 15 payloads
+            return unique_payloads[:20]  # Increased to 20 payloads
             
         except Exception as e:
-            print(f"Error generating payloads: {e}")
-            return ["<script>alert('XSS')</script>", "' OR 1=1--", "../../../etc/passwd"]
+            print(f"Error generating enhanced payloads: {e}")
+            return ["<script>alert('XSS')</script>", "' OR 1=1--", "../../../etc/passwd", "?id=1", "?id=2"]
+    
+    def _generate_test_urls(self, target_url: Optional[str], payloads: List[str], parameter: Optional[str] = None) -> List[str]:
+        """Generate test URLs with payloads"""
+        if not target_url or not payloads:
+            return []
+        
+        test_urls = []
+        param_name = parameter or "test"
+        
+        for payload in payloads[:5]:  # Top 5 payloads
+            try:
+                import urllib.parse
+                encoded_payload = urllib.parse.quote(payload)
+                test_url = f"{target_url}?{param_name}={encoded_payload}"
+                test_urls.append(test_url)
+            except:
+                continue
+        
+        return test_urls
+    
+    def _get_payload_rag_context(self, vulnerability_type: str) -> str:
+        """Get RAG context for payload generation"""
+        try:
+            if not self.kb_retriever:
+                return ""
+            
+            # Get vulnerability-specific knowledge
+            docs = self.kb_retriever.retrieve(f"{vulnerability_type} vulnerability payloads", k=2)
+            if docs:
+                context = "\n".join([(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:150] + "..." for doc in docs])
+                return context
+            
+            return ""
+        except Exception as e:
+            return f"RAG context error: {str(e)}"
+    
+    async def _generate_payloads(self, vulnerability_type: Optional[VulnerabilityType], target_url: Optional[str]) -> List[str]:
+        """Legacy method - redirect to enhanced version"""
+        return await self._generate_enhanced_payloads(vulnerability_type, target_url)
     
     async def _perform_scan(self, target_url: str) -> Dict[str, Any]:
         """Perform comprehensive scan với subdomain discovery, robots, sitemap, static files"""
@@ -2863,6 +3067,144 @@ Hãy thử /help để xem hướng dẫn chi tiết!"""
         except Exception as e:
             return f"Lỗi khi lấy enhanced RAG context: {str(e)}"
     
+    async def _handle_scan_command(self, message: str) -> ChatResponse:
+        """Xử lý lệnh /scan với RAG-enhanced analysis"""
+        try:
+            # Extract URL from message
+            url_pattern = r'https?://[^\s]+'
+            url_match = re.search(url_pattern, message)
+            
+            if not url_match:
+                return ChatResponse(
+                    message="[ERROR] Vui lòng cung cấp URL để scan. Ví dụ: /scan http://example.com",
+                    command=ChatCommand.SCAN,
+                    suggestions=[
+                        "Sử dụng: /scan http://testphp.vulnweb.com/",
+                        "Sử dụng: /scan http://demo.testfire.net/",
+                        "Xem hướng dẫn: /help"
+                    ]
+                )
+            
+            target_url = url_match.group()
+            
+            # Get RAG context for scan
+            rag_context = self._get_scan_rag_context(target_url)
+            
+            # Start scan with enhanced system
+            from app.core.enhanced_scan_system import EnhancedScanSystem
+            scan_system = EnhancedScanSystem()
+            
+            # Create scan job
+            job_id = await scan_system.start_scan(target_url)
+            
+            # Create response message with RAG importance
+            response_message = f"""[SCAN] **Enhanced Security Scan với RAG Intelligence**
+
+[LOCATION] **Target:** {target_url}
+[JOB] **Job ID:** {job_id}
+[RAG] **Knowledge Base:** Active với {len(rag_context)} characters context
+
+[BRAIN] **RAG-Enhanced Analysis:**
+{rag_context[:500]}...
+
+[PROCESS] **Scan Pipeline:**
+1. **Reconnaissance** - RAG-guided target analysis
+2. **Crawling** - RAG-enhanced path discovery  
+3. **Fuzzing** - RAG payload techniques
+4. **Vulnerability Detection** - RAG pattern matching
+5. **LLM + RAG Analysis** - Comprehensive intelligence
+
+[FEATURES] **RAG Intelligence:**
+• OWASP Top 10 2023 knowledge
+• Advanced payload techniques
+• Real-world vulnerability patterns
+• Best practice remediation
+• CVE database integration
+
+[STATUS] Scan đang chạy... Sử dụng /scan-status để kiểm tra tiến độ.
+
+[RAG IMPACT] RAG knowledge base cung cấp:
+- Context chính xác cho từng loại lỗ hổng
+- Advanced detection techniques
+- Comprehensive remediation guidance
+- Real-world attack patterns
+- Industry best practices"""
+            
+            return ChatResponse(
+                message=response_message,
+                command=ChatCommand.SCAN,
+                target_url=target_url,
+                suggestions=[
+                    f"Kiểm tra tiến độ: /scan-status {job_id}",
+                    f"Xem kết quả: /scan-results {job_id}",
+                    "Hủy scan: /scan-cancel",
+                    "Tạo payload: /payload xss " + target_url
+                ]
+            )
+            
+        except Exception as e:
+            return ChatResponse(
+                message=f"[ERROR] Lỗi khi bắt đầu scan: {str(e)}",
+                command=ChatCommand.SCAN,
+                suggestions=[
+                    "Kiểm tra URL có hợp lệ không",
+                    "Thử lại sau vài giây",
+                    "Sử dụng /help để xem hướng dẫn"
+                ]
+            )
+    
+    def _get_scan_rag_context(self, target_url: str) -> str:
+        """Get RAG context for scan analysis"""
+        try:
+            context_parts = []
+            
+            # Get RAG knowledge for comprehensive scan
+            if self.kb_retriever:
+                # Get OWASP Top 10 2023 knowledge
+                owasp_docs = self.kb_retriever.retrieve("OWASP Top 10 2023 security risks", k=5)
+                if owasp_docs:
+                    context_parts.append("**OWASP Top 10 2023 Knowledge:**")
+                    for doc in owasp_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+                
+                # Get vulnerability detection techniques
+                detection_docs = self.kb_retriever.retrieve("vulnerability detection techniques", k=4)
+                if detection_docs:
+                    context_parts.append("**Detection Techniques:**")
+                    for doc in detection_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+                
+                # Get security headers knowledge
+                headers_docs = self.kb_retriever.retrieve("security headers HTTP protection", k=3)
+                if headers_docs:
+                    context_parts.append("**Security Headers Analysis:**")
+                    for doc in headers_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+                
+                # Get payload techniques
+                payload_docs = self.kb_retriever.retrieve("payload techniques XSS SQL injection", k=4)
+                if payload_docs:
+                    context_parts.append("**Advanced Payload Techniques:**")
+                    for doc in payload_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+            
+            # Add target-specific analysis
+            context_parts.append(f"**Target Analysis for {target_url}:**")
+            context_parts.append("- Comprehensive vulnerability assessment")
+            context_parts.append("- RAG-guided detection patterns")
+            context_parts.append("- Advanced payload techniques")
+            context_parts.append("- Real-world attack scenarios")
+            context_parts.append("- Industry best practices")
+            
+            return "\n".join(context_parts)
+            
+        except Exception as e:
+            return f"RAG context retrieval error: {str(e)}"
+    
     def _get_enhanced_rag_context_for_natural_response(self, message: str) -> str:
         """Get enhanced RAG context for natural response"""
         try:
@@ -2952,3 +3294,141 @@ Hãy thử /help để xem hướng dẫn chi tiết!"""
             
         except Exception as e:
             return f"Lỗi khi lấy enhanced RAG context: {str(e)}"
+    
+    async def _handle_scan_command(self, message: str) -> ChatResponse:
+        """Xử lý lệnh /scan với RAG-enhanced analysis"""
+        try:
+            # Extract URL from message
+            url_pattern = r'https?://[^\s]+'
+            url_match = re.search(url_pattern, message)
+            
+            if not url_match:
+                return ChatResponse(
+                    message="[ERROR] Vui lòng cung cấp URL để scan. Ví dụ: /scan http://example.com",
+                    command=ChatCommand.SCAN,
+                    suggestions=[
+                        "Sử dụng: /scan http://testphp.vulnweb.com/",
+                        "Sử dụng: /scan http://demo.testfire.net/",
+                        "Xem hướng dẫn: /help"
+                    ]
+                )
+            
+            target_url = url_match.group()
+            
+            # Get RAG context for scan
+            rag_context = self._get_scan_rag_context(target_url)
+            
+            # Start scan with enhanced system
+            from app.core.enhanced_scan_system import EnhancedScanSystem
+            scan_system = EnhancedScanSystem()
+            
+            # Create scan job
+            job_id = await scan_system.start_scan(target_url)
+            
+            # Create response message with RAG importance
+            response_message = f"""[SCAN] **Enhanced Security Scan với RAG Intelligence**
+
+[LOCATION] **Target:** {target_url}
+[JOB] **Job ID:** {job_id}
+[RAG] **Knowledge Base:** Active với {len(rag_context)} characters context
+
+[BRAIN] **RAG-Enhanced Analysis:**
+{rag_context[:500]}...
+
+[PROCESS] **Scan Pipeline:**
+1. **Reconnaissance** - RAG-guided target analysis
+2. **Crawling** - RAG-enhanced path discovery  
+3. **Fuzzing** - RAG payload techniques
+4. **Vulnerability Detection** - RAG pattern matching
+5. **LLM + RAG Analysis** - Comprehensive intelligence
+
+[FEATURES] **RAG Intelligence:**
+• OWASP Top 10 2023 knowledge
+• Advanced payload techniques
+• Real-world vulnerability patterns
+• Best practice remediation
+• CVE database integration
+
+[STATUS] Scan đang chạy... Sử dụng /scan-status để kiểm tra tiến độ.
+
+[RAG IMPACT] RAG knowledge base cung cấp:
+- Context chính xác cho từng loại lỗ hổng
+- Advanced detection techniques
+- Comprehensive remediation guidance
+- Real-world attack patterns
+- Industry best practices"""
+            
+            return ChatResponse(
+                message=response_message,
+                command=ChatCommand.SCAN,
+                target_url=target_url,
+                suggestions=[
+                    f"Kiểm tra tiến độ: /scan-status {job_id}",
+                    f"Xem kết quả: /scan-results {job_id}",
+                    "Hủy scan: /scan-cancel",
+                    "Tạo payload: /payload xss " + target_url
+                ]
+            )
+            
+        except Exception as e:
+            return ChatResponse(
+                message=f"[ERROR] Lỗi khi bắt đầu scan: {str(e)}",
+                command=ChatCommand.SCAN,
+                suggestions=[
+                    "Kiểm tra URL có hợp lệ không",
+                    "Thử lại sau vài giây",
+                    "Sử dụng /help để xem hướng dẫn"
+                ]
+            )
+    
+    def _get_scan_rag_context(self, target_url: str) -> str:
+        """Get RAG context for scan analysis"""
+        try:
+            context_parts = []
+            
+            # Get RAG knowledge for comprehensive scan
+            if self.kb_retriever:
+                # Get OWASP Top 10 2023 knowledge
+                owasp_docs = self.kb_retriever.retrieve("OWASP Top 10 2023 security risks", k=5)
+                if owasp_docs:
+                    context_parts.append("**OWASP Top 10 2023 Knowledge:**")
+                    for doc in owasp_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+                
+                # Get vulnerability detection techniques
+                detection_docs = self.kb_retriever.retrieve("vulnerability detection techniques", k=4)
+                if detection_docs:
+                    context_parts.append("**Detection Techniques:**")
+                    for doc in detection_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+                
+                # Get security headers knowledge
+                headers_docs = self.kb_retriever.retrieve("security headers HTTP protection", k=3)
+                if headers_docs:
+                    context_parts.append("**Security Headers Analysis:**")
+                    for doc in headers_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+                
+                # Get payload techniques
+                payload_docs = self.kb_retriever.retrieve("payload techniques XSS SQL injection", k=4)
+                if payload_docs:
+                    context_parts.append("**Advanced Payload Techniques:**")
+                    for doc in payload_docs:
+                        context_parts.append(f"- {(getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc))[:200]}...")
+                    context_parts.append("")
+            
+            # Add target-specific analysis
+            context_parts.append(f"**Target Analysis for {target_url}:**")
+            context_parts.append("- Comprehensive vulnerability assessment")
+            context_parts.append("- RAG-guided detection patterns")
+            context_parts.append("- Advanced payload techniques")
+            context_parts.append("- Real-world attack scenarios")
+            context_parts.append("- Industry best practices")
+            
+            return "\n".join(context_parts)
+            
+        except Exception as e:
+            return f"RAG context retrieval error: {str(e)}"

@@ -1,377 +1,429 @@
 """
-LLM Enrichment - Enhanced RAG + LLM for vulnerability analysis
+LLM Enrichment System - Enrich findings với LLM và track provenance
 """
 
-import os
 import json
+import time
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
-from app.core.enhanced_rag_retriever import EnhancedRAGRetriever
-from app.clients.gemini_client import GeminiClient
-from app.core.tool_parsers import NormalizedFinding
+import re
 
 @dataclass
-class EnrichedFinding:
-    id: str
-    type: str
-    short_summary: str
+class RAGDocument:
+    content: str
+    source: str
+    doc_id: str
+    title: str
+    url: Optional[str] = None
+
+@dataclass
+class EnrichmentResult:
+    finding_id: str
     severity: str
     confidence: str
+    cvss_v3: Optional[str]
+    exploitability_score: int
     justification: str
-    cvss_v3: str
     safe_poc_steps: List[str]
-    remediation: List[str]
-    references: List[str]
-    raw_evidence: str
-    rag_context: str
+    remediation: List[Dict[str, str]]
+    references: List[Dict[str, str]]
+    provenance: List[Dict[str, str]]
+    llm_analysis: str
 
 class LLMEnrichment:
-    def __init__(self):
-        self.rag_retriever = EnhancedRAGRetriever()
-        self.llm_client = GeminiClient()
+    """LLM enrichment system với provenance tracking"""
     
-    async def enrich_findings(self, findings: List[NormalizedFinding], job_id: str) -> List[EnrichedFinding]:
-        """Enrich findings with RAG + LLM analysis"""
-        enriched_findings = []
-        
-        for finding in findings:
-            try:
-                # Get RAG context for this finding
-                rag_context = self._get_rag_context_for_finding(finding)
+    def __init__(self, llm_client, rag_retriever):
+        self.llm_client = llm_client
+        self.rag_retriever = rag_retriever
+    
+    async def enrich_finding(self, finding: Dict[str, Any]) -> EnrichmentResult:
+        """Enrich finding với LLM analysis và RAG context"""
+        try:
+            # Get RAG context
+            rag_docs = await self._get_rag_context(finding)
+            
+            # Build enrichment prompt
+            prompt = self._build_enrichment_prompt(finding, rag_docs)
+            
+            # Call LLM
+            llm_response = self.llm_client.chat(prompt)
+            
+            # Parse and validate response
+            enrichment_result = self._parse_llm_response(llm_response, finding, rag_docs)
+            
+            # Validate provenance
+            self._validate_provenance(enrichment_result, rag_docs)
+            
+            return enrichment_result
+            
+        except Exception as e:
+            print(f"LLM enrichment error: {e}")
+            return self._create_fallback_result(finding, str(e))
+    
+    async def _get_rag_context(self, finding: Dict[str, Any]) -> List[RAGDocument]:
+        """Get RAG context for finding"""
+        try:
+            vuln_type = finding.get('type', '').lower()
+            path = finding.get('path', '')
+            param = finding.get('param', '')
+            evidence = finding.get('evidence_snippet', '')
+            
+            # Build query
+            query_parts = [vuln_type, "vulnerability", "detection", "remediation"]
+            if path:
+                query_parts.append("path")
+            if param:
+                query_parts.append("parameter")
+            if evidence:
+                query_parts.append("evidence")
+            
+            query = " ".join(query_parts)
+            
+            # Retrieve documents
+            docs = self.rag_retriever.retrieve(query, k=5)
+            
+            # Convert to RAGDocument objects
+            rag_docs = []
+            for i, doc in enumerate(docs):
+                content = getattr(doc, 'content', str(doc)) if hasattr(doc, 'content') else str(doc)
+                source = getattr(doc, 'source', 'Unknown')
                 
-                # Generate LLM analysis
-                llm_analysis = await self._analyze_finding_with_llm(finding, rag_context)
-                
-                # Create enriched finding
-                enriched = EnrichedFinding(
-                    id=finding.id,
-                    type=finding.type,
-                    short_summary=llm_analysis.get('short_summary', finding.type),
-                    severity=llm_analysis.get('severity', finding.severity),
-                    confidence=llm_analysis.get('confidence', finding.confidence),
-                    justification=llm_analysis.get('justification', ''),
-                    cvss_v3=llm_analysis.get('cvss_v3', finding.cvss_v3 or '0.0'),
-                    safe_poc_steps=llm_analysis.get('safe_poc_steps', finding.safe_poc_steps),
-                    remediation=llm_analysis.get('remediation', finding.remediation),
-                    references=llm_analysis.get('references', []),
-                    raw_evidence=finding.evidence_snippet,
-                    rag_context=rag_context
+                rag_doc = RAGDocument(
+                    content=content,
+                    source=source,
+                    doc_id=f"doc_{source}_{i}",
+                    title=f"{source} - {vuln_type.title()}",
+                    url=None
                 )
-                
-                enriched_findings.append(enriched)
+                rag_docs.append(rag_doc)
+            
+            return rag_docs
                 
             except Exception as e:
-                print(f"Error enriching finding {finding.id}: {e}")
-                # Create fallback enriched finding
-                enriched = EnrichedFinding(
-                    id=finding.id,
-                    type=finding.type,
-                    short_summary=f"Vulnerability found: {finding.type}",
-                    severity=finding.severity,
-                    confidence=finding.confidence,
-                    justification="Analysis failed, using basic information",
-                    cvss_v3=finding.cvss_v3 or '0.0',
-                    safe_poc_steps=finding.safe_poc_steps,
-                    remediation=finding.remediation,
-                    references=[],
-                    raw_evidence=finding.evidence_snippet,
-                    rag_context=""
-                )
-                enriched_findings.append(enriched)
-        
-        return enriched_findings
+            print(f"RAG context error: {e}")
+            return []
     
-    def _get_rag_context_for_finding(self, finding: NormalizedFinding) -> str:
-        """Get RAG context for a specific finding"""
-        context_parts = []
+    def _build_enrichment_prompt(self, finding: Dict[str, Any], rag_docs: List[RAGDocument]) -> str:
+        """Build LLM enrichment prompt"""
         
-        # Get vulnerability-specific knowledge
-        vuln_info = self.rag_retriever.get_vulnerability_info(finding.type.lower().replace('-', '_'))
-        if vuln_info:
-            context_parts.append(f"""
-**VULNERABILITY KNOWLEDGE:**
-- Type: {finding.type}
-- Description: {vuln_info.get('description', 'N/A')}
-- CVSS Score: {vuln_info.get('cvss_score', 'N/A')}
-- CWE: {vuln_info.get('cwe', 'N/A')}
-- OWASP Top 10: {vuln_info.get('owasp_top10', 'N/A')}
-- Attack Complexity: {vuln_info.get('attack_complexity', 'N/A')}
-- Impact: {vuln_info.get('impact', 'N/A')}
-- Detection Methods: {', '.join(vuln_info.get('detection_methods', []))}
-- Remediation: {vuln_info.get('remediation', 'N/A')}
-""")
-        
-        # Get payload information
-        payloads = self.rag_retriever.get_payloads(finding.type.lower().replace('-', '_'))
-        if payloads:
-            context_parts.append(f"""
-**PAYLOAD INFORMATION:**
-- Available payloads: {len(payloads)} types
-- Categories: {', '.join(payloads.keys()) if isinstance(payloads, dict) else 'Basic payloads available'}
-""")
-        
-        # Get remediation guide
-        remediation_guide = self.rag_retriever.get_remediation_guide(finding.type.lower().replace('-', '_'))
-        if remediation_guide:
-            context_parts.append(f"""
-**REMEDIATION GUIDE:**
-- Prevention: {remediation_guide.get('prevention', 'N/A')}
-- Detection: {remediation_guide.get('detection', 'N/A')}
-- Response: {remediation_guide.get('response', 'N/A')}
-""")
-        
-        # Get error patterns if applicable
-        if 'sql' in finding.type.lower():
-            error_patterns = self.rag_retriever.get_error_patterns('mysql')
-            if error_patterns:
-                context_parts.append(f"""
-**SQL ERROR PATTERNS:**
-- Common MySQL errors: {len(error_patterns)} patterns
-- Detection methods: Error message analysis, behavior changes
-""")
-        
-        return "\n".join(context_parts)
-    
-    async def _analyze_finding_with_llm(self, finding: NormalizedFinding, rag_context: str) -> Dict[str, Any]:
-        """Analyze finding with LLM using RAG context"""
+        # Format RAG documents
+        rag_context = ""
+        for doc in rag_docs:
+            rag_context += f"Source: {doc.source} (ID: {doc.doc_id})\n"
+            rag_context += f"Content: {doc.content[:500]}...\n"
+            rag_context += "---\n"
         
         prompt = f"""
-You are a senior web security engineer. Analyze the following vulnerability finding and provide structured output.
+You are a senior web security engineer. Analyze this finding and provide enrichment.
 
-**FINDING INFORMATION:**
-- ID: {finding.id}
-- Type: {finding.type}
-- Path: {finding.path}
-- Parameter: {finding.parameter or 'N/A'}
-- Tool: {finding.tool}
-- Evidence: {finding.evidence_snippet[:500]}...
+FINDING_JSON: {json.dumps(finding, indent=2)}
 
-**RAG CONTEXT:**
+EVIDENCE_SNIPPET: {finding.get('evidence_snippet', '')}
+
+RAG_CONTEXT:
 {rag_context}
 
-**TASK:**
-Provide analysis in the following JSON format:
+Task: Produce JSON with keys:
+- id, short_summary, severity (Low/Med/High/Critical), confidence (Low/Med/High), 
+- cvss_v3, exploitability_score (0-100), justification, safe_poc_steps, 
+- remediation, references, provenance
+
+Rules:
+1) Use ONLY the provided evidence and RAG context to justify severity and confidence.
+2) Do NOT invent facts. If insufficient evidence, set confidence to Low.
+3) Output strictly valid JSON.
+4) Include source references from RAG context in provenance field.
+5) For remediation, provide specific code/config examples.
+6) For safe_poc_steps, provide non-destructive commands only.
+
+Expected JSON format:
 {{
-    "short_summary": "Brief 1-2 sentence summary of the vulnerability",
-    "severity": "Critical|High|Medium|Low|Info",
-    "confidence": "High|Medium|Low",
-    "justification": "Detailed explanation of severity and confidence assessment",
-    "cvss_v3": "CVSS v3.1 score (e.g., 7.5)",
-    "safe_poc_steps": ["Step 1", "Step 2", "Step 3", "Step 4"],
-    "remediation": ["Remediation step 1", "Remediation step 2", "Remediation step 3"],
-    "references": ["Reference 1", "Reference 2"]
+    "id": "{finding.get('id', '')}",
+    "short_summary": "Brief description of the finding",
+    "severity": "High",
+    "confidence": "High", 
+    "cvss_v3": "6.1",
+    "exploitability_score": 85,
+    "justification": "Detailed justification citing evidence and RAG sources",
+    "safe_poc_steps": [
+        "curl -s 'http://target.com/page?param=<script>alert(1)</script>' -o - | grep -i script"
+    ],
+    "remediation": [
+        {{
+            "type": "php",
+            "description": "Output encoding",
+            "code": "echo htmlspecialchars($_GET['param'], ENT_QUOTES, 'UTF-8');"
+        }}
+    ],
+    "references": [
+        {{
+            "title": "OWASP XSS Prevention Cheat Sheet",
+            "source": "OWASP",
+            "url": "https://owasp.org/www-community/xss"
+        }}
+    ],
+    "provenance": [
+        {{
+            "claim": "remediation",
+            "source_doc_id": "doc_owasp_0",
+            "snippet": "Use contextual output encoding..."
+        }}
+    ]
 }}
-
-**RULES:**
-1. Use ONLY provided evidence and RAG context to justify severity/confidence
-2. Provide non-destructive PoC steps
-3. Provide specific, actionable remediation steps
-4. Do NOT invent facts not present in evidence
-5. Be conservative with severity assessment
-6. Include relevant OWASP/CWE references when applicable
-
-**EVIDENCE ANALYSIS:**
-Focus on:
-- What the evidence shows
-- How the vulnerability can be exploited
-- What the potential impact is
-- How confident you are in the assessment
-
-Respond with ONLY the JSON object, no additional text.
 """
-        
+        return prompt
+    
+    def _parse_llm_response(self, llm_response: str, finding: Dict[str, Any], 
+                          rag_docs: List[RAGDocument]) -> EnrichmentResult:
+        """Parse LLM response and create enrichment result"""
         try:
-            response = await self.llm_client.chat(prompt)
+            # Try to extract JSON from response
+            json_match = re.search(r'\{.*\}', llm_response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                data = json.loads(json_str)
+            else:
+                # Fallback parsing
+                data = self._parse_fallback_response(llm_response)
             
-            # Try to parse JSON response
-            try:
-                # Extract JSON from response
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                
-                if json_start != -1 and json_end != -1:
-                    json_str = response[json_start:json_end]
-                    analysis = json.loads(json_str)
-                    
-                    # Validate required fields
-                    required_fields = ['short_summary', 'severity', 'confidence', 'justification']
-                    for field in required_fields:
-                        if field not in analysis:
-                            analysis[field] = 'N/A'
-                    
-                    return analysis
-                else:
-                    raise ValueError("No JSON found in response")
-                    
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"Error parsing LLM JSON response: {e}")
-                return self._create_fallback_analysis(finding)
+            # Create enrichment result
+            result = EnrichmentResult(
+                finding_id=finding.get('id', ''),
+                severity=data.get('severity', 'Unknown'),
+                confidence=data.get('confidence', 'Low'),
+                cvss_v3=data.get('cvss_v3'),
+                exploitability_score=data.get('exploitability_score', 0),
+                justification=data.get('justification', ''),
+                safe_poc_steps=data.get('safe_poc_steps', []),
+                remediation=data.get('remediation', []),
+                references=data.get('references', []),
+                provenance=data.get('provenance', []),
+                llm_analysis=llm_response
+            )
+            
+            return result
                 
         except Exception as e:
-            print(f"Error calling LLM: {e}")
-            return self._create_fallback_analysis(finding)
+            print(f"Error parsing LLM response: {e}")
+            return self._create_fallback_result(finding, f"Parse error: {str(e)}")
     
-    def _create_fallback_analysis(self, finding: NormalizedFinding) -> Dict[str, Any]:
-        """Create fallback analysis when LLM fails"""
-        return {
-            "short_summary": f"Vulnerability detected: {finding.type} at {finding.path}",
-            "severity": finding.severity,
-            "confidence": finding.confidence,
-            "justification": "LLM analysis failed, using basic assessment",
-            "cvss_v3": finding.cvss_v3 or "0.0",
-            "safe_poc_steps": finding.safe_poc_steps,
-            "remediation": finding.remediation,
-            "references": []
+    def _parse_fallback_response(self, response: str) -> Dict[str, Any]:
+        """Fallback parsing if JSON extraction fails"""
+        data = {
+            "severity": "Unknown",
+            "confidence": "Low",
+            "cvss_v3": None,
+            "exploitability_score": 0,
+            "justification": response[:500],
+            "safe_poc_steps": [],
+            "remediation": [],
+            "references": [],
+            "provenance": []
         }
+        
+        # Try to extract severity
+        if "critical" in response.lower():
+            data["severity"] = "Critical"
+        elif "high" in response.lower():
+            data["severity"] = "High"
+        elif "medium" in response.lower():
+            data["severity"] = "Medium"
+        elif "low" in response.lower():
+            data["severity"] = "Low"
+        
+        return data
     
-    async def generate_scan_summary(self, enriched_findings: List[EnrichedFinding], target_url: str, scan_profile: str) -> Dict[str, Any]:
-        """Generate comprehensive scan summary"""
-        
-        # Count findings by severity
-        severity_counts = {}
-        for finding in enriched_findings:
-            severity = finding.severity
-            severity_counts[severity] = severity_counts.get(severity, 0) + 1
-        
-        # Get top findings
-        top_findings = sorted(enriched_findings, key=lambda x: self._severity_to_score(x.severity), reverse=True)[:5]
-        
-        # Generate LLM summary
-        summary_prompt = f"""
-You are a senior security consultant. Provide a comprehensive security assessment summary.
-
-**SCAN DETAILS:**
-- Target: {target_url}
-- Profile: {scan_profile}
-- Total Findings: {len(enriched_findings)}
-
-**FINDINGS BY SEVERITY:**
-{json.dumps(severity_counts, indent=2)}
-
-**TOP FINDINGS:**
-"""
-        
-        for i, finding in enumerate(top_findings, 1):
-            summary_prompt += f"""
-{i}. {finding.type} - {finding.severity}
-   Path: {finding.path}
-   Summary: {finding.short_summary}
-   Confidence: {finding.confidence}
-"""
-        
-        summary_prompt += """
-
-**TASK:**
-Provide a professional security assessment summary in JSON format:
-{
-    "executive_summary": "2-3 sentence executive summary",
-    "risk_assessment": "Overall risk level: Critical|High|Medium|Low",
-    "key_findings": ["Key finding 1", "Key finding 2", "Key finding 3"],
-    "immediate_actions": ["Action 1", "Action 2", "Action 3"],
-    "recommendations": ["Recommendation 1", "Recommendation 2", "Recommendation 3"],
-    "next_steps": ["Next step 1", "Next step 2"]
-}
-
-Focus on:
-- Business impact
-- Immediate risks
-- Prioritized remediation
-- Long-term security improvements
-
-Respond with ONLY the JSON object.
-"""
-        
+    def _validate_provenance(self, result: EnrichmentResult, rag_docs: List[RAGDocument]):
+        """Validate that provenance claims are supported by RAG documents"""
         try:
-            response = await self.llm_client.chat(summary_prompt)
+            # Check if justification contains evidence or RAG content
+            justification = result.justification.lower()
+            evidence_found = False
+            rag_found = False
             
-            # Parse JSON response
-            try:
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                
-                if json_start != -1 and json_end != -1:
-                    json_str = response[json_start:json_end]
-                    summary = json.loads(json_str)
-                    
-                    # Add metadata
-                    summary['metadata'] = {
-                        'target_url': target_url,
-                        'scan_profile': scan_profile,
-                        'total_findings': len(enriched_findings),
-                        'severity_breakdown': severity_counts,
-                        'scan_timestamp': self._get_current_timestamp()
-                    }
-                    
-                    return summary
-                else:
-                    raise ValueError("No JSON found in response")
-                    
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"Error parsing summary JSON: {e}")
-                return self._create_fallback_summary(enriched_findings, target_url, scan_profile)
+            # Check for evidence snippets
+            if any(keyword in justification for keyword in ['script', 'alert', 'payload', 'injection']):
+                evidence_found = True
+            
+            # Check for RAG content
+            for doc in rag_docs:
+                if any(word in justification for word in doc.content.lower().split()[:10]):
+                    rag_found = True
+                    break
+            
+            # Adjust confidence if no evidence/RAG support
+            if not evidence_found and not rag_found:
+                result.confidence = "Low"
+                result.justification += " [Note: Limited evidence support - manual review recommended]"
+            
+        except Exception as e:
+            print(f"Provenance validation error: {e}")
+    
+    def _create_fallback_result(self, finding: Dict[str, Any], error_msg: str) -> EnrichmentResult:
+        """Create fallback result when enrichment fails"""
+        return EnrichmentResult(
+            finding_id=finding.get('id', ''),
+            severity="Unknown",
+            confidence="Low",
+            cvss_v3=None,
+            exploitability_score=0,
+            justification=f"Enrichment failed: {error_msg}",
+            safe_poc_steps=[],
+            remediation=[],
+            references=[],
+            provenance=[],
+            llm_analysis=error_msg
+        )
+    
+    def merge_enrichment_with_finding(self, finding: Dict[str, Any], 
+                                    enrichment: EnrichmentResult) -> Dict[str, Any]:
+        """Merge enrichment result back into finding"""
+        try:
+            # Update finding with enrichment data
+            finding.update({
+                "severity": enrichment.severity,
+                "confidence": enrichment.confidence,
+                "cvss_v3": enrichment.cvss_v3,
+                "exploitability_score": enrichment.exploitability_score,
+                "justification": enrichment.justification,
+                "safe_poc_steps": enrichment.safe_poc_steps,
+                "remediation": enrichment.remediation,
+                "references": enrichment.references,
+                "provenance": enrichment.provenance,
+                "llm_analysis": enrichment.llm_analysis,
+                "enriched_at": time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            })
+            
+            return finding
+            
+        except Exception as e:
+            print(f"Error merging enrichment: {e}")
+            return finding
+    
+    def calculate_exploitability_score(self, finding: Dict[str, Any]) -> int:
+        """Calculate exploitability score based on evidence"""
+        try:
+            score = 0
+            evidence = finding.get('evidence_snippet', '').lower()
+            vuln_type = finding.get('type', '').lower()
+            
+            # Base score by vulnerability type
+            if 'xss' in vuln_type:
+                score += 30
+            elif 'sql' in vuln_type:
+                score += 40
+            elif 'rce' in vuln_type:
+                score += 50
+            else:
+                score += 20
+            
+            # Evidence reflection
+            if any(marker in evidence for marker in ['<script>', 'alert(', 'javascript:']):
+                score += 30
+            
+            # Parameter location
+            if finding.get('param'):
+                score += 20
+            
+            # Confirmatory tests
+            confirm_tests = finding.get('confirmatory_tests', [])
+            if any(test.get('result') == 'passed' for test in confirm_tests):
+                score += 20
+            
+            # Security headers (reduce score if present)
+            # This would need to be checked against actual response headers
+            
+            return min(100, max(0, score))
                 
         except Exception as e:
-            print(f"Error generating summary: {e}")
-            return self._create_fallback_summary(enriched_findings, target_url, scan_profile)
+            print(f"Error calculating exploitability score: {e}")
+            return 0
     
-    def _create_fallback_summary(self, enriched_findings: List[EnrichedFinding], target_url: str, scan_profile: str) -> Dict[str, Any]:
-        """Create fallback summary when LLM fails"""
-        severity_counts = {}
-        for finding in enriched_findings:
-            severity = finding.severity
-            severity_counts[severity] = severity_counts.get(severity, 0) + 1
-        
-        # Determine overall risk
-        if severity_counts.get('Critical', 0) > 0:
-            risk_level = 'Critical'
-        elif severity_counts.get('High', 0) > 0:
-            risk_level = 'High'
-        elif severity_counts.get('Medium', 0) > 0:
-            risk_level = 'Medium'
+    def generate_safe_poc(self, finding: Dict[str, Any]) -> List[str]:
+        """Generate safe PoC steps"""
+        try:
+            poc_steps = []
+            vuln_type = finding.get('type', '').lower()
+            path = finding.get('path', '')
+            param = finding.get('param', '')
+            target = finding.get('target', '')
+            
+            if 'xss' in vuln_type and param:
+                # Safe XSS PoC
+                poc_steps.append(f"curl -s '{target}{path}?{param}=<script>alert(1)</script>' -o - | grep -i script")
+                poc_steps.append(f"# Check if payload is reflected in response")
+                poc_steps.append(f"# Non-destructive test - no JavaScript execution")
+            
+            elif 'sql' in vuln_type and param:
+                # Safe SQL injection PoC
+                poc_steps.append(f"curl -s '{target}{path}?{param}=1' -o response1.txt")
+                poc_steps.append(f"curl -s '{target}{path}?{param}=1\\'' -o response2.txt")
+                poc_steps.append(f"diff response1.txt response2.txt")
+                poc_steps.append(f"# Look for SQL error messages or different responses")
+            
+            elif 'lfi' in vuln_type and param:
+                # Safe LFI PoC
+                poc_steps.append(f"curl -s '{target}{path}?{param}=../../../etc/passwd' -o - | head -5")
+                poc_steps.append(f"# Check for file content disclosure")
+            
         else:
-            risk_level = 'Low'
-        
-        return {
-            "executive_summary": f"Security scan of {target_url} identified {len(enriched_findings)} vulnerabilities with {risk_level} overall risk level.",
-            "risk_assessment": risk_level,
-            "key_findings": [f"{f.type} at {f.path}" for f in enriched_findings[:3]],
-            "immediate_actions": [
-                "Review and prioritize findings by severity",
-                "Implement immediate fixes for critical vulnerabilities",
-                "Schedule security team review"
-            ],
-            "recommendations": [
-                "Implement regular security scanning",
-                "Establish vulnerability management process",
-                "Conduct security training for development team"
-            ],
-            "next_steps": [
-                "Remediate critical and high severity findings",
-                "Implement security controls",
-                "Schedule follow-up security assessment"
-            ],
-            "metadata": {
-                'target_url': target_url,
-                'scan_profile': scan_profile,
-                'total_findings': len(enriched_findings),
-                'severity_breakdown': severity_counts,
-                'scan_timestamp': self._get_current_timestamp()
-            }
-        }
+                poc_steps.append(f"# Manual verification required for {vuln_type}")
+                poc_steps.append(f"# Target: {target}{path}")
+                if param:
+                    poc_steps.append(f"# Parameter: {param}")
+            
+            return poc_steps
+            
+        except Exception as e:
+            print(f"Error generating PoC: {e}")
+            return ["# Error generating PoC steps"]
     
-    def _severity_to_score(self, severity: str) -> int:
-        """Convert severity to numeric score for sorting"""
-        scores = {
-            'Critical': 5,
-            'High': 4,
-            'Medium': 3,
-            'Low': 2,
-            'Info': 1
-        }
-        return scores.get(severity, 0)
-    
-    def _get_current_timestamp(self) -> str:
-        """Get current timestamp"""
-        from datetime import datetime
-        return datetime.now().isoformat()
-
+    def generate_remediation(self, finding: Dict[str, Any], rag_docs: List[RAGDocument]) -> List[Dict[str, str]]:
+        """Generate remediation suggestions based on RAG context"""
+        try:
+            remediation = []
+            vuln_type = finding.get('type', '').lower()
+            
+            # Base remediation by vulnerability type
+            if 'xss' in vuln_type:
+                remediation.append({
+                    "type": "php",
+                    "description": "Output encoding",
+                    "code": "echo htmlspecialchars($_GET['param'], ENT_QUOTES, 'UTF-8');"
+                })
+                remediation.append({
+                    "type": "http",
+                    "description": "Content Security Policy",
+                    "code": "add_header Content-Security-Policy \"default-src 'self'; script-src 'self'\" always;"
+                })
+            
+            elif 'sql' in vuln_type:
+                remediation.append({
+                    "type": "php",
+                    "description": "Prepared statements",
+                    "code": "$stmt = $pdo->prepare('SELECT * FROM users WHERE id = ?'); $stmt->execute([$id]);"
+                })
+            
+            elif 'lfi' in vuln_type:
+                remediation.append({
+                    "type": "php",
+                    "description": "Path validation",
+                    "code": "$allowed_paths = ['/var/www/', '/uploads/']; if (!in_array(dirname($file), $allowed_paths)) { die('Access denied'); }"
+                })
+            
+            # Add RAG-based remediation if available
+            for doc in rag_docs:
+                if 'remediation' in doc.content.lower() or 'fix' in doc.content.lower():
+                    remediation.append({
+                        "type": "rag",
+                        "description": f"From {doc.source}",
+                        "code": doc.content[:200] + "..."
+                    })
+                    break
+            
+            return remediation
+            
+        except Exception as e:
+            print(f"Error generating remediation: {e}")
+            return [{"type": "error", "description": "Error generating remediation", "code": str(e)}]
